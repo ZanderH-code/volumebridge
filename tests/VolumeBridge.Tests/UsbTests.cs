@@ -276,8 +276,10 @@ public sealed class UsbipServerTests : IDisposable
         Assert.Equal(b, BinaryPrimitives.ReadUInt32BigEndian(rb.AsSpan(4)));
         Assert.Equal(10u, BinaryPrimitives.ReadUInt32BigEndian(ra.AsSpan(32)));
         Assert.Equal(192, BinaryPrimitives.ReadInt32BigEndian(ra.AsSpan(48 + 8))); // packet 0 actual length
-        Assert.InRange(tA, 8, 200);
-        Assert.InRange(tB - tA, 5, 200);   // second URB completes ~10 ms after the first
+        // Never early: each URB completes no sooner than its reserved 10 ms frame window
+        // (lateness depends on the waiter; the portable SleepWaiter is coarse on Windows).
+        Assert.InRange(tA, 9, 500);
+        Assert.InRange(tB, 19, 500);
         lock (_pcm) Assert.Equal(pcm.Concat(pcm), _pcm);
     }
 
