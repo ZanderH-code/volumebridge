@@ -25,8 +25,17 @@ public sealed class AppConfig
     public string? OutputDeviceId { get; set; }
 
     public int TargetBufferMs { get; set; } = 30;
+
+    /// <summary>Volume range and step advertised by "VolumeBridge Speaker" to Windows.</summary>
     public double MinDb { get; set; } = -60;
     public double MaxDb { get; set; } = 0;
+    public double VolumeStepDb { get; set; } = 0.25;
+
+    /// <summary>Local TCP port of the built-in USB/IP server.</summary>
+    public int UsbipPort { get; set; } = 3240;
+
+    /// <summary>Full path to usbip.exe; null = default install folders / PATH.</summary>
+    public string? UsbipPath { get; set; }
     public int SmoothingMs { get; set; } = 20;
 
     /// <summary>auto | apply | passthrough. See docs/PLAN.md, "双重衰减".</summary>

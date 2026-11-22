@@ -11,7 +11,7 @@
 
 ## 状态
 
-**计划已定稿（v3），下一步 M1：虚拟 USB 音箱。** 目前只有 `--probe` 诊断模式。
+**M1 待测：** `--speaker` 模式会模拟 "VolumeBridge Speaker" 并记录 Windows 发来的音量和静音，暂不转发声音到音箱。测试步骤见 [docs/M1-TEST.md](docs/M1-TEST.md)。
 
 - 计划与可行性评审：[docs/PLAN.md](docs/PLAN.md)
 

@@ -10,10 +10,12 @@ static class Program
         VolumeBridge - make Windows volume control a fixed-volume USB speaker.
 
         Usage:
-          VolumeBridge --probe [--seconds N]   Phase 1: print devices, volume, mute, format, capture level every 200 ms
+          VolumeBridge --speaker               M1: expose "VolumeBridge Speaker" via usbip-win2 and log volume/mute/level
+          VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format every 200 ms
           VolumeBridge --help
 
-        config.json and probe.log live next to the exe. The audio engine is not implemented yet (see docs/PLAN.md).
+        config.json, volumebridge.log and probe.log live next to the exe.
+        Audio is not yet forwarded to the speaker (see docs/PLAN.md, M2).
         """;
 
     static int Main(string[] args)
@@ -27,7 +29,7 @@ static class Program
             return args.Length == 0 ? 1 : 0;
         }
 
-        if (args[0] != "--probe")
+        if (args[0] != "--probe" && args[0] != "--speaker")
         {
             Console.Error.WriteLine($"Unknown option: {args[0]}\n\n{Usage}");
             return 2;
@@ -63,10 +65,18 @@ static class Program
         };
         Console.CancelKeyPress += onCancel;
 
-        using var log = new StreamWriter(Path.Combine(baseDir, "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
+        bool speaker = args[0] == "--speaker";
+        using var log = new StreamWriter(Path.Combine(baseDir, speaker ? "volumebridge.log" : "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
         using var tee = new TeeWriter(Console.Out, log);
-        tee.WriteLine($"VolumeBridge probe, {Environment.OSVersion}, config: {Path.Combine(baseDir, AppConfig.FileName)}. Ctrl+C to stop.");
-        try { return new Probe(config, tee).Run(duration, cts.Token); }
+        var version = typeof(Program).Assembly.GetName().Version;
+        tee.WriteLine($"VolumeBridge {version} {args[0]}, {Environment.OSVersion}, config: {Path.Combine(baseDir, AppConfig.FileName)}. Ctrl+C to stop.");
+        try
+        {
+            if (!speaker) return new Probe(config, tee).Run(duration, cts.Token);
+            void Log(string s) { lock (tee) tee.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {s}"); }
+            if (duration is not null) cts.CancelAfter(duration.Value);
+            return new SpeakerMode(config, Log).Run(cts.Token);
+        }
         finally { Console.CancelKeyPress -= onCancel; }
     }
 

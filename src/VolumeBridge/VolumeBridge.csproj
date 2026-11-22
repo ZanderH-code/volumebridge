@@ -9,6 +9,7 @@
     <RootNamespace>VolumeBridge</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
