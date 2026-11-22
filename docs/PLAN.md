@@ -1,121 +1,134 @@
-# VolumeBridge 实施计划（v2，经 Gemini 4 Neon 评审）
+# VolumeBridge 实施计划（v3：自带虚拟 USB 音箱，经 Neon 评审修订）
 
-目标：单文件 exe 替代 Voicemeeter，让 Windows 音量滑块控制固定音量的 USB 音箱（JBL Flip 6）。
+目标：一个安装包，装完后 Windows 音量滑块和静音键就能控制 JBL Flip 6（USB 音频模式下它不响应系统音量）。
 
-结论：**可行，需修改**（Neon verdict: FEASIBLE-WITH-CHANGES）。下面是修改后的计划，末尾附评审台账。
+v3 相对 v2 的变化：由用户选定（2026-11-22）。VolumeBridge 不再依赖外部虚拟声卡程序，而是**自己模拟一个 USB 音箱**。v2 的评审结论中，适用于输出端（WASAPI 渲染、健壮性、日志）的部分继续保留，见文末。
 
-## 数据流
+## 架构
 
 ```
-应用 → Windows 默认播放设备 = 虚拟声卡播放端 (Render)
-          ↓ 驱动内部回环
-虚拟声卡录制端 (Capture) → WASAPI 共享/事件采集 → float32 → 增益(平滑，可直通)
-   → 环形缓冲 → 可变比重采样(格式转换 + 漂移补偿) → WASAPI 共享/事件渲染 → Flip 6
-音量来源：虚拟声卡 Render 端的 IAudioEndpointVolume（MasterVolumeLevelScalar + Mute）
+应用 → Windows 默认播放设备 = "VolumeBridge Speaker"
+         （usbaudio.sys ← usbip-win2 虚拟 USB 主控 ← TCP 127.0.0.1:3240）
+              ↓ 同步 OUT 的 isochronous URB：48 kHz / 16-bit / 立体声 PCM
+VolumeBridge.exe：USB/IP 服务端 + UAC1 设备模拟
+              ├─ 控制请求：Feature Unit 的 SET_CUR VOLUME（1/256 dB）和 MUTE → 目标增益
+              ↓
+         环形缓冲 → 增益（平滑） → 格式转换/重采样 → WASAPI 共享/事件渲染 → Flip 6
 ```
 
-## 关键风险：双重衰减
+- 这种做法参考了 [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)（BSD-2，Go，`src/internal/{uac1,usbip}` 约 1000 行），把它的 UAC1 描述符和 USB/IP 服务端移植到 C#。只保留**播放路径**，去掉录制路径。以下 4 处必须同时修改，否则 usbaudio 会报错误代码 10：
+  - 配置描述符的 `bNumInterfaces=2`；
+  - AC Header 改为 `bLength=9, wTotalLength=40, bInCollection=1, baInterfaceNr={1}`；
+  - `OP_REP_DEVLIST` 只写 2 个接口元组；
+  - `writeUSBDevice` 的接口数改为 2。
 
-如果虚拟 Render 端的 `QueryHardwareSupport()` 没有 `ENDPOINT_HARDWARE_SUPPORT_VOLUME` 标志，Windows 音频引擎会在共享模式下**先在软件里施加音量和静音**，再交给驱动。这样回环到录制端的数据已经衰减过了，exe 再乘一次增益就是双重衰减（50% 滑块会变成 25% 幅度）。
+  另外，`SetInterface`、端点和实体（entity）的处理只接受接口 1、EP 0x01、Feature Unit 2。
+- 设备身份：VID 0xFFFF，PID 用 **0x5642**（不和 Virtual Cables 的 0xCA0n 冲突）；`iSerialNumber` 固定为 `VOLBRIDGE001`。这样 Windows 按 VID+PID+序列号识别设备实例，端点 ID 在重启后保持不变，Windows 能记住默认设备，也不会出现 "2- VolumeBridge Speaker" 这样的重复设备。
+- 每个设备只允许一个 USB/IP 导入会话。新的 `OP_REQ_IMPORT` 到来时，先关闭旧连接。
+- usbip-win2（[vadimgrn/usbip-win2](https://github.com/vadimgrn/usbip-win2)，BSD-2，驱动有 WHLK 认证或 attestation 签名）提供虚拟 USB 主控驱动和 `usbip.exe`，随安装包一起分发。
+- 不需要录制端，也不需要第二个后台程序。
 
-处理：`gainMode = auto | apply | passthrough`
-- `auto`：根据硬件音量标志和阶段 1 的实测 RMS 来决定。没有硬件音量标志时默认 `passthrough`。
-- `apply`：exe 自己乘增益。用于驱动声称有硬件音量、实际却忽略的情况。
-- 阶段 1 的 `--probe` 会打印这两项依据（硬件支持标志、实时 RMS），由实测来定。
+## 音量：以"真硬件音量"的方式实现
 
-注意：如果结果是 `passthrough`，"音量控制"其实是 Windows 自己完成的，exe 只负责把声音搬运到 Flip 6，同时处理格式和漂移。需求里的增益公式和平滑过渡只在 `apply` 模式下生效。
+- 描述符里声明 Feature Unit，带 Mute 和 Volume 控制（`bmaControls=0x03`）。usbaudio.sys 会把它报告为 `ENDPOINT_HARDWARE_SUPPORT_VOLUME|MUTE`。这样 Windows **不在软件里调小声音**，而是把滑块换算成 dB，用 `SET_CUR` 发给设备，和真实 USB 音箱完全一样。Virtual Cables 收到这些值只存起来、不使用，这正是它的滑块无效的原因。
+- 我们收到 `SET_CUR VOLUME` 后，按 `gain = 10^(dB/20)` 设置目标增益；收到 `MUTE=1` 时增益为 0。增益变化时做 20 ms 线性斜坡过渡。
+- dB 范围通过 `GET_MIN/MAX/RES` 告诉 Windows，默认 -60…0 dB，**步长 0.25 dB**（`0x0040`；如果是 1 dB，按音量键每次调 2% 会显得粗糙）。范围可配置，对应 config 的 `minDb`/`maxDb`。必须满足 `(max-min) % res == 0`；初始的 `GET_CUR` 必须落在区间内。
+- `0x8000`（-32768）在 UAC1 里表示 -∞ dB，此时增益为 0。其他值钳位到 `[minDb, maxDb]`。
+- Windows 会把滑块映射到这个区间。阶段 1 要实测这个映射：100%→1% 时下发的 dB 值、听感是否连续。
+- 和需求公式的关系：需求里的 `dB = 20·log10(max(scalar, 0.001))` 是在 exe 自己读 scalar 时用的。v3 直接使用 Windows 下发的 dB 值，更接近 Windows 对真实硬件的行为。如果实测曲线不理想，保留一个备选：用 `IAudioEndpointVolume` 读取 "VolumeBridge Speaker" 的 scalar，再按需求公式计算增益（配置项 `volumeSource: device | scalar`）。
+- 不存在声音被调小两次的问题。
 
-## 虚拟声卡选型（已核实）
+## 时钟
 
-| 候选 | 实情 | 结论 |
-| --- | --- | --- |
-| [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)（BSD-2） | 用户态程序模拟 USB Audio Class 1.0 设备，经 [usbip-win2](https://github.com/vadimgrn/usbip-win2) 接入，Windows 使用自带的 usbaudio.sys。usbip-win2 README 称驱动已通过 WHLK 认证或做了 attestation 签名（OSSign）。免费版固定为 48 kHz、16-bit、立体声；作者称免费版存在内存错误 bug，商店付费版已修复。必须保持 Virtual Cables 程序在运行。 | 首选，阶段 1 实测。需确认：开着安全启动和 HVCI 能否安装、是否出现一对端点、滑块是否生效、长期稳定性 |
-| [Virtual Audio Wire](https://github.com/HSpear/virtual-audio-wire) | 基于 MSVAD 的内核驱动源码，没有发布任何二进制，需要自行用 WDK 编译并开启测试签名 | **淘汰**（普通用户不可能装） |
-| VB-CABLE | 闭源，WHQL 签名，开着安全启动可装。Render 端叫 "CABLE Input"，Capture 端叫 "CABLE Output" | 兜底 |
+- 在 USB/IP 方式下，设备的时钟其实就是**我们完成 isochronous URB 的节奏**。Windows 一次排队多个 URB（每个约 10 ms）。usbip-win2 强制使用 `USBD_START_ISO_TRANSFER_ASAP`，并且没有实现帧号查询，所以真正起作用的只有完成时间。
+- 节奏用**单调高精度时钟**驱动：`Stopwatch` 加上 `CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)`。不能用 `Thread.Sleep`/`Task.Delay`，它们 15.6 ms 的精度会导致 URB 断流。每个 URB 按每个包 1 ms 预约连续的截止时间，沿用 Virtual Cables 的 `reserveIsoCompletion` 思路。
+- **漂移：用锁相环（PLL）微调这个时钟的速率。** Flip 6 正常播放时，比较它实际消耗的帧数和经过的墙钟时间，把单调时钟的速率在 ±500 ppm 内平滑地调向 Flip 6 的时钟。这样 Windows 送声音的速度会跟着 Flip 6 走，原则上不需要重采样。
+- **Flip 6 拔出、暂停、被独占或刚从睡眠唤醒时，PLL 保持 0 ppm**，也就是纯墙钟。URB 照常按时完成，声音丢弃，**绝不能让 Windows 音频引擎卡住**（Neon N1：如果直接按 Flip 6 的播放回调来完成 URB，Flip 6 不可用时引擎会卡死）。
+- **兜底：** 保留 v2 的环形缓冲 + PI 控制器 + 可变比重采样器。如果 PLL 微调节奏在实测中出现问题，就固定为墙钟，改用重采样补偿漂移。
+- 格式：虚拟设备固定为 48 kHz / 16-bit / 立体声。Flip 6 的混音格式在打开时查询；不是 48 kHz 时用重采样器转换。
+- 目标缓冲可配置，最低可设到 15 ms，默认 30 ms。
 
-`--probe` 按 config 中 `virtualCandidates` 的顺序自动查找第一个两端都存在的候选，并报告结果。
+## 生命周期与权限
 
-## Flip 6 的设备名
+- **不需要管理员权限运行**（Neon N3，已核实）：usbip-win2 0.9.8.1 的 VHCI 设备对象 SDDL 是 `SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RW_RES_R`（`drivers/ude/vhci.cpp:642`），普通用户就能执行 attach/detach。所以 VolumeBridge 以普通权限运行，登录自启用普通的计划任务即可。阶段 1 要实测确认这一点。只有将来 usbip-win2 收紧权限时，才引入一个最小的提权助手。
+- 启动顺序：
+  1. 在 127.0.0.1:`port`（默认 3240）监听；
+  2. 执行 `usbip.exe --tcp-port <port> attach -r 127.0.0.1 -b 1-1 --once`。`--tcp-port` 是全局选项，必须放在子命令前面；`--once` 表示连不上时不让驱动无限重试。
+- **0.9.8.1 不能传 `--serial`**：该版本有已知 bug，修复在发布之后（commit a2a1159）。
+- 启动时先清理上次遗留的端口，即 `usbip port` 中指向本机端口的条目。
+- **正常退出时必须先 `usbip detach -p <port>`，再关闭监听。** 否则驱动会认为是意外断开，在 30 s 后开始自动重连，最多 20 次（`usbip2_ude.inf` 中的 `ReattachFirstDelay/MaxAttempts`）。
+- 进程崩溃时：驱动的自动重连会在 30 s 后尝试。下次启动时先清理旧端口，再重新 attach。
+- **睡眠唤醒**：usbip-win2 不处理电源事件（`d0_entry/d0_exit` 为空实现）。所以 VolumeBridge 收到 `PBT_APMRESUMEAUTOMATIC` 后要主动检查 USB/IP 会话和 `usbip port` 的状态，断了就立即重新 attach，同时重新打开 Flip 6 的渲染流。
+- 3240 端口被占用时（比如装了 Virtual Cables 或其他 USB/IP 服务端），改用配置中的端口。
+- 设备拔插：Flip 6 拔出时，虚拟音箱保留，收到的声音丢弃，缓冲有上限。插回后重新打开渲染流（沿用 v2 的状态机和退避策略）。
 
-USB 模式下 Flip 6 可能显示为 **"Zgmicro AUDIO"**，而不是含 "JBL" 的名称（Neon 的说法，未在用户机器上核实）。因此：
-- `outputKeywords` 默认是 `["JBL", "Zgmicro"]`，并且可以用 `outputDeviceId` 精确指定设备。
-- 匹配到多个 Render 设备时拒绝启动，要求用设备 ID 消歧。
-- **输出设备与虚拟 Render 端是同一设备时拒绝启动**，否则会形成数字反馈回路。
+## 安装包
 
-## 技术选型
+- 用 Inno Setup 制作，在 CI 的 windows-latest 上构建，产出 `VolumeBridgeSetup.exe`。安装包本身需要管理员权限（为了装驱动），装好后 VolumeBridge 以普通权限运行。
+- 安装步骤：
+  1. 安装内置的 usbip-win2 0.9.8.1 x64，已安装同版本或更新版本时跳过。命令为 `USBip-0.9.8.1-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /COMPONENTS="main,client"`，不装它的 GUI、SDK 和 pdb。安装界面要提示用户：**装驱动时所有 USB 3.0 Hub 会重启，USB 设备（包括 Flip 6）会短暂断开**。
+  2. 把 VolumeBridge.exe 和默认 config.json 复制到 `%ProgramFiles%\VolumeBridge`；
+  3. 注册登录启动的计划任务（普通权限）；
+  4. usbip-win2 的安装器带 `AlwaysRestart=yes`。阶段 1 要实测：不重启能否直接 attach。
+     - 能：安装后立即启动；
+     - 不能：提示用户重启，首次启动和默认设备切换都推迟到重启后登录时进行。
+  5. 可选：把 "VolumeBridge Speaker" 设为默认播放设备，通过未公开的 `IPolicyConfig` 接口实现。具体做法：
+     - 先用 `IMMNotificationClient` 等到新端点出现，再设置；
+     - 设置 `eConsole` 和 `eMultimedia` 两个角色，`eCommunications` 可选；
+     - 记录原来的默认设备；
+     - 所有调用都"尽力而为"，失败不影响安装和卸载。
+- 卸载：
+  - 先停止进程（会自动 detach），删除计划任务；
+  - 还原默认设备，前提是原设备仍处于活动状态，且不是 VolumeBridge Speaker 本身；
+  - 删除文件；
+  - usbip-win2 保留还是一并卸载，在卸载时询问用户（其他软件可能也在用它，而且它的卸载也要求重启）。
+- 许可证：在安装目录附带 VolumeBridge、usbip-win2、Virtual Cables（移植来源）的许可证声明。
 
-- .NET 8，`PublishSingleFile` + `SelfContained` + `win-x64` + `IncludeNativeLibrariesForSelfExtract`，**不做 trim**（COM 互操作）。
-- **NAudio 只用底层的 `NAudio.CoreAudioApi`**（MMDeviceEnumerator、AudioClient、AudioCaptureClient、AudioRenderClient、AudioClockClient、AudioEndpointVolume）。引擎不使用 `WasapiCapture` 和 `WasapiOut`：它们会丢掉 QPC 时间戳和缓冲区标志，自带的拉取循环也会和我们的漂移控制冲突。采集和渲染各用一个事件驱动线程，等待带 500–1000 ms 超时（防止休眠唤醒后流卡死）。`--probe` 只用于测量，例外地允许使用 `WasapiCapture`。
-- 线程注册 MMCSS（`AvSetMmThreadCharacteristicsW("Pro Audio")`），热路径不做内存分配。
-- 进程类型：阶段 1 只有 CLI，先用 `Exe`。阶段 4 改为 `WinExe`，带命令行参数时调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，避免登录自启时弹出控制台窗口。
-- 托盘：优先用 `Shell_NotifyIconW` 的 P/Invoke（约 150 行），避免 WinForms 带来约 20–30 MB 的体积。
+## 风险
 
-## 重采样与时钟漂移
+1. **usbip-win2 在用户机器上能否正常安装和工作**，包括安全启动、HVCI、睡眠唤醒后的表现。这是整个方案的地基，阶段 1 首先验证。
+2. Virtual Cables 作者把这套技术路线标为"实验性"。usbip-win2 旧版本有内存错误问题（作者称新版已修复），所以必须固定使用新版本。
+3. 完成节奏跟随 Flip 6 时钟的做法能否被 usbaudio 接受，需要实测，兜底方案是重采样。
+4. 延迟：usbaudio 约 10 ms，环形缓冲 15–40 ms，Flip 6 的共享模式缓冲 10–20 ms，**预计约 40–80 ms**。听音乐、看视频没问题，玩游戏能感觉到。以实测为准。
+5. 本地 TCP 端口暴露给本机的其他进程（只绑定 127.0.0.1；单会话；进程以普通权限运行）。
+6. 移植工作量：USB/IP 协议、UAC1 请求、iso 时序，约 1000–1500 行 C# 和对应的单元测试。协议部分可以在 Linux 上用录制的 URB 字节序列做单元测试。
 
-- 环形缓冲放在重采样器之前（按输入采样率的帧存放）。渲染线程拉数据时，由重采样器按当前比率消耗缓冲。
-- 重采样器：带 Kaiser 窗的 windowed-sinc，16–32 抽头，相位表之间线性插值，支持连续变比。它同时负责 44.1↔48 kHz 转换和 ±ppm 的漂移微调。两端都是 48 kHz 时也用它（比率接近 1），保证只有一条代码路径。
-- 控制器：先对 `fill_ms` 做约 2 s 的低通滤波，消除 WASAPI 周期造成的 ±10 ms 锯齿抖动，再送入 PI 控制器。目标 30 ms，输出限幅 ±1000 ppm。
-  - 抗积分饱和：输出被限幅时冻结积分项。
-  - 采集空闲（无数据包或 `AUDCLNT_BUFFERFLAGS_SILENT`）时保持控制器状态不动。
-  - 欠载、过载或重新打开设备时重置控制器状态。
-- 硬兜底：
-  - `fill > target + 40 ms`：一次性丢弃到目标值，做 5 ms 交叉淡化，并计入过载次数。
-  - `fill < 5 ms`：进入 `Priming` 子状态，输出静音（带淡出），直到 `fill >= target` 才恢复，并计入欠载次数。
+## 阶段与里程碑
 
-## 增益（仅 apply 模式）
+1. **阶段 1（验证）**：
+   用户选择等 M1 完成后，直接用 VolumeBridge 自带的虚拟音箱来验证。验证项目：
+   - usbip-win2 能否在安全启动和 HVCI 下安装，装完是否需要重启；
+   - 普通权限能否 attach；
+   - 设备能否出现，端点是否报告 `hw=[vol,mute]`；
+   - 滑块 100%→1% 和静音时，设备收到的 dB 和静音值；
+   - 声音电平是否正常；
+   - 重启 VolumeBridge 后端点 ID 是否不变；
+   - 睡眠唤醒后能否恢复。
+2. **M1**：C# 版 USB/IP 服务端 + UAC1 播放设备 + attach/detach + 高精度节奏器。把收到的音量、静音、声音电平和 URB 统计写进日志，还不输出到 Flip 6。另附一个手动的 `M1-TEST.md`：先手动安装 usbip-win2，再运行 exe。
+3. **M2**：输出到 Flip 6，包括增益、格式转换、时钟跟随（兜底为重采样）、延迟统计。
+4. **M3**：健壮性：拔插、睡眠唤醒、崩溃恢复、日志。
+5. **M4**：安装包、计划任务、默认设备切换与还原、托盘。
 
-- 按需求：`dB = 20·log10(max(scalar, 0.001))`，换算成线性值就是 `gain = max(scalar, 0.001)`，代码里直接这样写，并用 `minDb`/`maxDb` 钳位。
-- Windows 的 scalar 本身已经过 audio taper 映射。如果实测发现低段下降过快，可以改用 `GetMasterVolumeLevel()` 读取 Windows 原生的 dB 值，配置项为 `curve: scalar | nativeDb`。
-- 静音时目标增益为 0。增益按样本做线性斜坡，时长 `smoothingMs`（默认 20）。COM 回调线程只写一个 volatile 目标值。
+## 从 v2 保留的结论（Neon 第 1 轮评审）
 
-## 延迟
+- 输出端只用 NAudio 的底层 CoreAudioApi，不使用 `WasapiOut`。线程注册 MMCSS，热路径不做内存分配，事件等待设有限超时。
+- Flip 6 可能显示为 "Zgmicro AUDIO"。输出设备按关键字或设备 ID 匹配，匹配到多个时拒绝启动；**输出设备是 VolumeBridge Speaker 自身时拒绝启动**（防止声音自我循环）。
+- 每次打开设备都重新查询 `GetMixFormat()`。渲染会话退出 Windows 通话自动闪避（ducking）。处理 `DEVICE_INVALIDATED`、`DEVICE_IN_USE` 和唤醒事件。
+- config 和日志路径基于 `AppContext.BaseDirectory`。WinExe + AttachConsole。托盘用 `Shell_NotifyIconW`。
 
-- 实时管线延迟 = 采集包年龄（`qpc_now - capture_qpc`，遇到 `TIMESTAMP_ERROR` 或 0 时跳过）+ 环形缓冲填充时长 + 渲染端 padding（`GetCurrentPadding / rate`）。每 10 s 记录一次 min/avg/max。
-- 打开设备时记录一次两端的 `GetStreamLatency()`，作为静态参考值。
-- 声学延迟（USB 传输加音箱内部 DSP）需要外接麦克风测量，属于可选项，不计入日志数值。
+v2 中针对外部虚拟声卡的结论（VB-CABLE 兜底、gainMode 自动判断、录制端 RMS）不再适用。`--probe` 保留为诊断工具。
 
-## 健壮性
-
-- 状态机：`Idle → Opening → Running(Priming/Streaming) → Faulted → 退避 → Opening`。
-- `IMMNotificationClient` 收到的事件投递到单一控制线程，在那里重建 COM 对象。
-- `AUDCLNT_E_DEVICE_INVALIDATED`、`AUDCLNT_E_DEVICE_IN_USE`（被其他程序独占）、事件等待超时、`WM_POWERBROADCAST` 唤醒消息：都转入 Faulted，按 500 ms 到 5 s 指数退避后重开。每次重开都重新查询 `GetMixFormat()`，不缓存格式。
-- 渲染会话调用 `SetDuckingPreference(TRUE)`，退出 Windows 通话时的自动闪避（ducking）。
-- 输出不可用时，采集数据直接丢弃，环形缓冲有固定上限。
-- 用命名 Mutex 防止多开。检测到 `voicemeeter*.exe` 进程时警告并退出（加 `--force` 可跳过）。
-- config 和日志路径一律基于 `AppContext.BaseDirectory`（计划任务启动时的工作目录是 System32）。
-
-## 日志、配置、部署
-
-- 日志 `volumebridge.log`，与 exe 同目录，按 2 MB × 3 个文件滚动。每 60 s 输出一次统计：欠载数、过载数、ppm、填充量、延迟。
-- `config.json` 不存在时自动生成默认文件。
-- `--install-autostart`：用 Task Scheduler 的 XML 方式（`schtasks /Create /XML`）创建任务，避免路径中的空格和引号问题。触发器为 ONLOGON，权限为 LIMITED。`--uninstall-autostart` 删除该任务。
-- 退出时停止所有流、释放 COM 和 Mutex。不修改系统默认设备，不留残留状态。
-
-## 环境分工
-
-- 本机（Linux）：DSP 核心和单元测试、编译、`dotnet publish -r win-x64` 交叉发布、CI。
-- 用户（Windows）：驱动安装、`--probe` 实测、全部验收测试。
-
-## 里程碑
-
-1. **M0（本次）**：仓库、`--probe`、CI 发布 exe、阶段 1 测试步骤 → 用户实测 → 写 `docs/PHASE1-REPORT.md` → **等用户确认**。
-2. M1：引擎跑通（底层 WASAPI，先做直通，暂不补偿漂移）。
-3. M2：重采样、漂移控制、延迟统计，附 DSP 单元测试。
-4. M3：健壮性和日志。
-5. M4：托盘、自启动、WinExe、正式发布。
-
-## Neon 评审台账（第 1 轮，gemini-4-neon，thought_level=medium）
+## Neon 评审台账（v3，第 1 轮，gemini-4-neon，thought_level=medium，结论：FEASIBLE-WITH-CHANGES）
 
 | ID | 级别 | 结论 |
 | --- | --- | --- |
-| N1 | blocker | **部分接受**。VAW 淘汰（核实无二进制发布）。Virtual Cables 保留首选：Neon 称 usbip-win 未签名，但 usbip-win2 README 写明已获 WHLK/attestation 签名，Virtual Cables 使用的正是 usbip-win2，最终以阶段 1 实测为准 |
-| N2 | blocker | 接受，新增 gainMode 与硬件音量标志检测 |
-| N3 | blocker | 接受，probe 列出全部设备，支持多关键字和设备 ID |
-| N4 | blocker | 接受，引擎只用 NAudio 底层 CoreAudioApi |
-| N5 | blocker | 接受，拒绝反馈回路和多重匹配 |
-| N6 | should | 接受（抗积分饱和、空闲保持、Priming、状态重置） |
-| N7 | should | 接受，代码里直接用 scalar，另提供 `curve` 选项 |
-| N8 | should | 接受，按新公式计算延迟 |
-| N9 | should | 接受（阶段 4 处理 WinExe 和托盘体积） |
-| N10 | should | 接受（休眠唤醒、MMCSS、ducking、独占模式、格式变化） |
-| N11 | nit | 接受（BaseDirectory、XML 方式建任务） |
+| N1 | blocker | 接受：改为墙钟 + PLL 微调，Flip 6 不可用时保持 0 ppm，使用高精度定时器 |
+| N2 | blocker | 接受：去掉录制路径时 4 处同步修改 |
+| N3 | should | 接受（已核实 `vhci.cpp:642` 的 SDDL）：以普通权限运行 |
+| N4 | should | 接受：`0x8000` 表示静音，步长改为 0.25 dB，校验区间约束 |
+| N5 | should | 接受（已核实 `usbip.cpp:178` 全局选项、`inf:78-80` 自动重连）：`--tcp-port` 放在子命令前，加 `--once`，不传 `--serial`，退出时 detach |
+| N6 | should | 接受（已核实 `setup.iss:112` 及组件定义）：静默安装只装 main 和 client，提示 Hub 会重启，处理需要重启的情况 |
+| N7 | should | 接受：唤醒后主动检查并重新 attach |
+| N8 | should | 接受：PID 0x5642，固定序列号，`IPolicyConfig` 等待端点出现后再设置、按条件还原 |
+| N9 | should | 接受：单会话 |
+| N10 | nit | 接受：延迟预期改为 40–80 ms |

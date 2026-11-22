@@ -3,17 +3,17 @@
 用单文件 exe 替代 Voicemeeter，让 Windows 音量滑块和静音键能控制一台不响应系统音量的 USB 音箱（例如 USB 音频模式下的 JBL Flip 6）。
 
 ```
-应用 → 虚拟声卡（默认播放设备） → VolumeBridge 采集 → 增益/格式转换/漂移补偿 → Flip 6
+应用 → "VolumeBridge Speaker"（VolumeBridge 通过 USB/IP 模拟的 USB 音箱）
+     → Windows 音量以 dB 下发给它 → 增益/格式转换/时钟跟随 → Flip 6
 ```
 
-不自带驱动，虚拟声卡使用现成项目：首选 [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)，兜底用 VB-CABLE。
+不自己写驱动：虚拟 USB 主控使用已签名的 [usbip-win2](https://github.com/vadimgrn/usbip-win2)，随安装包分发。UAC1 设备模拟移植自 [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)（BSD-2）。
 
 ## 状态
 
-**阶段 1：验证中。** 目前只有 `--probe` 诊断模式，音频引擎尚未实现。
+**计划已定稿（v3），下一步 M1：虚拟 USB 音箱。** 目前只有 `--probe` 诊断模式。
 
 - 计划与可行性评审：[docs/PLAN.md](docs/PLAN.md)
-- 阶段 1 测试步骤：[docs/PHASE1.md](docs/PHASE1.md)
 
 ## 使用
 
