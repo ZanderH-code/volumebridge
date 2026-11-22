@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using VolumeBridge.Audio;
 using VolumeBridge.Core;
@@ -64,6 +65,16 @@ static class Program
             cts.Cancel();
         };
         Console.CancelKeyPress += onCancel;
+        // Closing the console window / logoff / shutdown arrive as SIGTERM. Windows kills the process
+        // once the handler returns (or after ~5 s), so block until the run loop has cleaned up
+        // (detaching the virtual speaker); otherwise usbip-win2 would start re-attach attempts.
+        using var finished = new ManualResetEventSlim();
+        using var onTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
+        {
+            ctx.Cancel = true;
+            cts.Cancel();
+            finished.Wait(4000);
+        });
 
         bool speaker = args[0] == "--speaker";
         using var log = new StreamWriter(Path.Combine(baseDir, speaker ? "volumebridge.log" : "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
@@ -74,10 +85,21 @@ static class Program
         {
             if (!speaker) return new Probe(config, tee).Run(duration, cts.Token);
             void Log(string s) { lock (tee) tee.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {s}"); }
+            // One instance per machine; the installer also uses this name (AppMutex) to detect a running copy.
+            using var single = new Mutex(true, @"Global\VolumeBridge.Running", out bool firstInstance);
+            if (!firstInstance)
+            {
+                Log("VolumeBridge is already running.");
+                return 6;
+            }
             if (duration is not null) cts.CancelAfter(duration.Value);
             return new SpeakerMode(config, Log).Run(cts.Token);
         }
-        finally { Console.CancelKeyPress -= onCancel; }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+            finished.Set();
+        }
     }
 
     sealed class TeeWriter(TextWriter a, TextWriter b) : TextWriter
