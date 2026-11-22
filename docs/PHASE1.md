@@ -36,7 +36,7 @@
 | 滑块移动时 `VIRT vol=` 是否跟着变 | | |
 | 静音时 `mute=` 是否变成 1 | | |
 | 清单中播放端的 `hw=` 显示什么（`vol` 还是 `-`） | | |
-| 滑块 100%→10% 时 `REC rms` 下降了多少 dB（约 20 dB 说明 Windows 已经衰减过，应选 passthrough；不变则应选 apply） | | |
+| 滑块 100%→10% 时 `REC rms` 下降了多少 dB？和 `VIRT` 行括号里的 dB 变化（通常 20–40 dB）大致相同，说明 Windows 已经衰减过，应选 passthrough；基本不变则应选 apply | | |
 | 静音时 `REC rms` 是否变成 `-inf` | | |
 | Flip 6 的名称和格式（`OUT` 行、清单） | | |
 

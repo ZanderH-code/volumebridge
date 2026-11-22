@@ -13,14 +13,17 @@ namespace VolumeBridge.Audio;
 public sealed class Probe(AppConfig config, TextWriter output)
 {
     static readonly Guid IeeeFloat = new("00000003-0000-0010-8000-00aa00389b71");
+    static readonly Guid Pcm = new("00000001-0000-0010-8000-00aa00389b71");
     const int IntervalMs = 200;
 
     readonly LevelMeter _meter = new();
-    WasapiCapture? _capture;
+    volatile WasapiCapture? _capture;
     MMDevice? _captureDevice;
     string? _captureId;
     volatile bool _capturing;
     bool _unsupported;
+    DateTime _nextCaptureRetryUtc;
+    static readonly TimeSpan CaptureRetryDelay = TimeSpan.FromSeconds(2);
     string? _lastSelection;
 
     public int Run(TimeSpan? duration, CancellationToken ct)
@@ -55,8 +58,8 @@ public sealed class Probe(AppConfig config, TextWriter output)
                                + "#" + virt?.Candidate.Name + "#" + outp.Device?.Id + outp.Error;
             if (selection != _lastSelection)
             {
-                _lastSelection = selection;
                 PrintInventory(renders, captures, virt, outp);
+                _lastSelection = selection;
             }
 
             EnsureCapture(enumerator, virt?.Capture.Id);
@@ -103,9 +106,11 @@ public sealed class Probe(AppConfig config, TextWriter output)
         else
         {
             var vr = renders.First(d => d.ID == virt.Render.Id);
-            bool hwVol = ((uint)vr.AudioEndpointVolume.HardwareSupport & 1) != 0;
+            bool? hwVol = Safe(() => ((uint)vr.AudioEndpointVolume.HardwareSupport & 1) != 0, (bool?)null);
             Line($"Virtual cable: {virt.Candidate.Name}  play=\"{virt.Render.Name}\"  rec=\"{virt.Capture.Name}\"");
-            Line(hwVol
+            Line(hwVol is null
+                ? "  Playback endpoint hardware-support flags unreadable."
+                : hwVol.Value
                 ? "  Playback endpoint reports HARDWARE volume: Windows will not attenuate; REC level should stay flat when the slider moves -> gainMode=apply."
                 : "  Playback endpoint has NO hardware volume: Windows attenuates in software; REC level should follow the slider -> gainMode=passthrough.");
             Line("  Verify: play steady audio, move the slider 100% -> 50% -> 10% and mute; watch REC rms.");
@@ -117,10 +122,14 @@ public sealed class Probe(AppConfig config, TextWriter output)
     /// <summary>Keeps a capture stream open on <paramref name="id"/>; restarts it if it stopped or the device changed.</summary>
     void EnsureCapture(MMDeviceEnumerator enumerator, string? id)
     {
-        if (id == _captureId && (id is null || _capturing || _unsupported)) return;
+        if (id == _captureId && (id is null || _capturing || _unsupported || DateTime.UtcNow < _nextCaptureRetryUtc)) return;
+        bool retrySameDevice = id == _captureId;
         StopCapture();
         if (id is null) return;
+        if (retrySameDevice) Line("REC restarting capture");
         _captureId = id;
+        // Back off between attempts on the same device; a device change retries immediately.
+        _nextCaptureRetryUtc = DateTime.UtcNow + CaptureRetryDelay;
 
         _captureDevice = enumerator.GetDevice(id);
         var cap = new WasapiCapture(_captureDevice, true, 20);
@@ -136,23 +145,31 @@ public sealed class Probe(AppConfig config, TextWriter output)
         cap.RecordingStopped += (_, e) =>
         {
             if (e.Exception is not null) Line($"REC stopped: {e.Exception.Message}");
-            _capturing = false;
+            if (ReferenceEquals(_capture, cap)) _capturing = false;
         };
         _meter.Read();
-        cap.StartRecording();
+        // Publish before starting: the capture thread may fail and fire RecordingStopped immediately.
         _capture = cap;
         _capturing = true;
+        try { cap.StartRecording(); }
+        catch (Exception e)
+        {
+            Line($"REC start failed {Err(e)}: {e.Message}");
+            StopCapture();
+            _captureId = id; // keep the id so the retry waits out the backoff
+        }
     }
 
     void StopCapture()
     {
-        if (_capture is not null)
+        var cap = _capture;
+        _capture = null; // our own stop must not look like a failure to RecordingStopped
+        if (cap is not null)
         {
-            try { _capture.StopRecording(); } catch { /* device may already be gone */ }
-            _capture.Dispose();
+            try { cap.StopRecording(); } catch { /* device may already be gone */ }
+            cap.Dispose();
         }
         _captureDevice?.Dispose();
-        _capture = null;
         _captureDevice = null;
         _captureId = null;
         _capturing = false;
@@ -161,7 +178,20 @@ public sealed class Probe(AppConfig config, TextWriter output)
 
     static DeviceInfo Info(MMDevice d) => new(d.ID, d.FriendlyName);
 
+    /// <summary>One misbehaving endpoint (sleeping HDMI/Bluetooth) must not abort the whole report.</summary>
+    static T Safe<T>(Func<T> f, T fallback)
+    {
+        try { return f(); } catch { return fallback; }
+    }
+
+    static string Err(Exception e) => $"(err: {e.GetType().Name} 0x{e.HResult:X8})";
+
     static string VolumeText(MMDevice d)
+    {
+        try { return VolumeTextUnsafe(d); } catch (Exception e) { return $"\"{Safe(() => d.FriendlyName, "?")}\" {Err(e)}"; }
+    }
+
+    static string VolumeTextUnsafe(MMDevice d)
     {
         var v = d.AudioEndpointVolume;
         return string.Create(CultureInfo.InvariantCulture,
@@ -170,22 +200,30 @@ public sealed class Probe(AppConfig config, TextWriter output)
 
     static string FormatText(MMDevice d)
     {
-        using var client = d.AudioClient;
-        var f = client.MixFormat;
-        return $"{f.SampleRate}Hz {f.Channels}ch {f.BitsPerSample}{(KindOf(f) == SampleKind.Float32 ? "f" : "i")}";
+        try
+        {
+            using var client = d.AudioClient;
+            var f = client.MixFormat;
+            return $"{f.SampleRate}Hz {f.Channels}ch {f.BitsPerSample}{(KindOf(f) == SampleKind.Float32 ? "f" : "i")}";
+        }
+        catch (Exception e) { return Err(e); }
     }
 
     static string HwText(MMDevice d)
     {
-        uint hw = (uint)d.AudioEndpointVolume.HardwareSupport;
-        return $"{((hw & 1) != 0 ? "vol" : "-")},{((hw & 2) != 0 ? "mute" : "-")},{((hw & 4) != 0 ? "meter" : "-")}";
+        try
+        {
+            uint hw = (uint)d.AudioEndpointVolume.HardwareSupport;
+            return $"{((hw & 1) != 0 ? "vol" : "-")},{((hw & 2) != 0 ? "mute" : "-")},{((hw & 4) != 0 ? "meter" : "-")}";
+        }
+        catch (Exception e) { return Err(e); }
     }
 
     static SampleKind? KindOf(WaveFormat f)
     {
         bool isFloat = f.Encoding == WaveFormatEncoding.IeeeFloat ||
                        (f is WaveFormatExtensible x && x.SubFormat == IeeeFloat);
-        bool isPcm = f.Encoding == WaveFormatEncoding.Pcm || (f is WaveFormatExtensible && !isFloat);
+        bool isPcm = f.Encoding == WaveFormatEncoding.Pcm || (f is WaveFormatExtensible y && y.SubFormat == Pcm);
         return (isFloat, isPcm, f.BitsPerSample) switch
         {
             (true, _, 32) => SampleKind.Float32,

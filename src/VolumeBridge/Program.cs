@@ -54,12 +54,20 @@ static class Program
         }
 
         using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        // First Ctrl+C stops cleanly; a second one force-exits if teardown hangs.
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            if (cts.IsCancellationRequested) return;
+            e.Cancel = true;
+            cts.Cancel();
+        };
+        Console.CancelKeyPress += onCancel;
 
         using var log = new StreamWriter(Path.Combine(baseDir, "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
         using var tee = new TeeWriter(Console.Out, log);
         tee.WriteLine($"VolumeBridge probe, {Environment.OSVersion}, config: {Path.Combine(baseDir, AppConfig.FileName)}. Ctrl+C to stop.");
-        return new Probe(config, tee).Run(duration, cts.Token);
+        try { return new Probe(config, tee).Run(duration, cts.Token); }
+        finally { Console.CancelKeyPress -= onCancel; }
     }
 
     sealed class TeeWriter(TextWriter a, TextWriter b) : TextWriter
