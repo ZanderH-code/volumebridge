@@ -98,6 +98,7 @@ static void GuidText(REFGUID g, wchar_t* out, size_t cch)
 // ---------------------------------------------------------------------------------------------
 static SRWLOCK g_sharedLock = SRWLOCK_INIT;
 static VbShared* g_shared = nullptr;
+static bool g_sharedWritable = false; // audiodg may only be allowed to read the file
 
 static VbShared* OpenShared()
 {
@@ -112,21 +113,30 @@ static VbShared* OpenShared()
         if (DataPath(path, MAX_PATH, L"apo.dat"))
             file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) { error = GetLastError(); step = L"CreateFile"; }
+        bool writable = file != INVALID_HANDLE_VALUE;
+        if (!writable && DataPath(path, MAX_PATH, L"apo.dat"))
+        {
+            // Read-only is enough to follow the app's volume and ceiling (no status reporting then).
+            error = GetLastError();
+            file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) step = L"read-write open (using read-only)";
+        }
+        if (file == INVALID_HANDLE_VALUE) { if (error == 0) error = GetLastError(); step = L"CreateFile"; }
         else
         {
-            HANDLE map = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, VB_SHARED_SIZE, nullptr);
+            HANDLE map = CreateFileMappingW(file, nullptr, writable ? PAGE_READWRITE : PAGE_READONLY, 0, writable ? VB_SHARED_SIZE : 0, nullptr);
             if (map == nullptr) { error = GetLastError(); step = L"CreateFileMapping"; }
             CloseHandle(file);
             if (map != nullptr)
             {
-                void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, VB_SHARED_SIZE);
+                void* view = MapViewOfFile(map, writable ? FILE_MAP_ALL_ACCESS : FILE_MAP_READ, 0, 0, VB_SHARED_SIZE);
                 if (view == nullptr) { error = GetLastError(); step = L"MapViewOfFile"; }
                 CloseHandle(map); // the view keeps the mapping alive
                 if (view != nullptr)
                 {
                     auto* sh = static_cast<VbShared*>(view);
-                    if (sh->magic != VB_SHARED_MAGIC)
+                    if (writable && sh->magic != VB_SHARED_MAGIC)
                     {
                         ZeroMemory(sh, sizeof(VbShared));
                         sh->version = 1;
@@ -134,6 +144,7 @@ static VbShared* OpenShared()
                         InterlockedExchange(reinterpret_cast<volatile LONG*>(&sh->magic), static_cast<LONG>(VB_SHARED_MAGIC));
                     }
                     g_shared = sh; // kept mapped for the life of the process
+                    g_sharedWritable = writable;
                     mappedNow = true;
                 }
             }
@@ -149,7 +160,8 @@ static VbShared* OpenShared()
 
 static float ReadFloat(volatile float* p)
 {
-    LONG v = InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(p), 0, 0);
+    // Plain aligned 32-bit read (atomic on x64). No interlocked op: the view may be read-only.
+    LONG v = *reinterpret_cast<volatile LONG*>(p);
     float f;
     memcpy(&f, &v, sizeof f);
     return f;
@@ -172,22 +184,45 @@ static float GainFromSlider(float scalar, bool muted)
 // ---------------------------------------------------------------------------------------------
 // The APO
 // ---------------------------------------------------------------------------------------------
+// The audio engine creates APOs aggregated inside its own object (pUnkOuter != null), so the APO must
+// support COM aggregation: the public IUnknown methods delegate to the outer object, and the engine
+// holds the inner, non-delegating IUnknown.
+struct INonDelegatingUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE NonDelegatingQueryInterface(REFIID riid, void** ppv) = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingAddRef() = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingRelease() = 0;
+};
+
 class VolumeBridgeApo final :
     public CBaseAudioProcessingObject,
     public IAudioSystemEffects3,
-    public IAudioProcessingObjectNotifications
+    public IAudioProcessingObjectNotifications,
+    public INonDelegatingUnknown
 {
 public:
     static const CRegAPOProperties<1> sm_RegProperties;
 
-    VolumeBridgeApo() : CBaseAudioProcessingObject(sm_RegProperties) { g_objects++; }
+    explicit VolumeBridgeApo(IUnknown* outer) : CBaseAudioProcessingObject(sm_RegProperties)
+    {
+        // Same vtable layout as IUnknown (QI, AddRef, Release), so it can stand in for one.
+        m_outer = outer != nullptr ? outer : reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));
+        g_objects++;
+    }
 
-    // IUnknown
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+    // IUnknown of every interface: delegate to the controlling (outer) unknown.
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override { return m_outer->QueryInterface(riid, ppv); }
+    STDMETHODIMP_(ULONG) AddRef() override { return m_outer->AddRef(); }
+    STDMETHODIMP_(ULONG) Release() override { return m_outer->Release(); }
+
+    // Inner (non-delegating) IUnknown: identity and lifetime of this object.
+    HRESULT STDMETHODCALLTYPE NonDelegatingQueryInterface(REFIID riid, void** ppv) override
     {
         if (ppv == nullptr) return E_POINTER;
         *ppv = nullptr;
-        if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioProcessingObject))
+        if (riid == __uuidof(IUnknown))
+            *ppv = static_cast<INonDelegatingUnknown*>(this);
+        else if (riid == __uuidof(IAudioProcessingObject))
             *ppv = static_cast<IAudioProcessingObject*>(this);
         else if (riid == __uuidof(IAudioProcessingObjectRT))
             *ppv = static_cast<IAudioProcessingObjectRT*>(this);
@@ -211,11 +246,11 @@ public:
             }
             return E_NOINTERFACE;
         }
-        AddRef();
+        reinterpret_cast<IUnknown*>(*ppv)->AddRef(); // via the outer for interfaces, the inner for IUnknown
         return S_OK;
     }
-    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_refs); }
-    STDMETHODIMP_(ULONG) Release() override
+    ULONG STDMETHODCALLTYPE NonDelegatingAddRef() override { return InterlockedIncrement(&m_refs); }
+    ULONG STDMETHODCALLTYPE NonDelegatingRelease() override
     {
         ULONG r = InterlockedDecrement(&m_refs);
         if (r == 0) delete this;
@@ -284,7 +319,8 @@ public:
         if (!discoveryOnly)
         {
             m_shared = OpenShared();
-            if (m_shared != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInitKind), static_cast<LONG>(kind == 0 ? 9 : kind));
+            m_stats = g_sharedWritable ? m_shared : nullptr;
+            if (m_stats != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoInitKind), static_cast<LONG>(kind == 0 ? 9 : kind));
         }
 
         m_bIsInitialized = true;
@@ -319,17 +355,17 @@ public:
         m_gain = TargetGain(); // start at the right level, no fade-in
         m_rampTarget = m_gain;
         m_rampLeft = 0;
-        if (m_shared != nullptr)
+        if (m_stats != nullptr)
         {
             AcquireSRWLockExclusive(&g_sharedLock); // non-RT; keeps reset + increment together
             // A new audiodg process: instance counts left by a previous (crashed/restarted) one are stale.
             const LONG pid = static_cast<LONG>(GetCurrentProcessId());
-            if (InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoPid), pid) != pid)
-                InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances), 0);
-            InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            if (InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoPid), pid) != pid)
+                InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoInstances), 0);
+            InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_stats->apoInstances));
             ReleaseSRWLockExclusive(&g_sharedLock);
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoSampleRate), static_cast<LONG>(rate));
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoChannels), static_cast<LONG>(m_u32SamplesPerFrame));
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoSampleRate), static_cast<LONG>(rate));
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoChannels), static_cast<LONG>(m_u32SamplesPerFrame));
         }
         m_counted = true;
         return S_OK;
@@ -338,10 +374,10 @@ public:
     STDMETHODIMP UnlockForProcess() override
     {
         ApoLog(L"UnlockForProcess");
-        if (m_counted && m_shared != nullptr)
+        if (m_counted && m_stats != nullptr)
         {
             AcquireSRWLockExclusive(&g_sharedLock);
-            InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_stats->apoInstances));
             ReleaseSRWLockExclusive(&g_sharedLock);
         }
         m_counted = false;
@@ -394,10 +430,10 @@ public:
         out->u32ValidFrameCount = frames;
         out->u32BufferFlags = in->u32BufferFlags;
 
-        if (m_shared != nullptr)
+        if (m_stats != nullptr)
         {
-            WriteFloat(&m_shared->apoTargetGain, target);
-            InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&m_shared->apoHeartbeat), static_cast<LONG64>(GetTickCount64()));
+            WriteFloat(&m_stats->apoTargetGain, target);
+            InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&m_stats->apoHeartbeat), static_cast<LONG64>(GetTickCount64()));
         }
     }
 
@@ -448,21 +484,21 @@ public:
         WriteFloat(&m_notifGain, GainFromSlider(master, muted));
         if (!m_haveNotif.exchange(true, std::memory_order_acq_rel))
             ApoLog(L"first volume notification: master=%u%% muted=%d", static_cast<unsigned>(master * 100 + 0.5f), muted ? 1 : 0);
-        if (m_shared != nullptr)
+        if (m_stats != nullptr)
         {
-            WriteFloat(&m_shared->apoMasterVolume, master);
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoMuted), muted ? 1 : 0);
-            InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_shared->apoNotifications));
+            WriteFloat(&m_stats->apoMasterVolume, master);
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoMuted), muted ? 1 : 0);
+            InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_stats->apoNotifications));
         }
     }
 
 private:
     ~VolumeBridgeApo()
     {
-        if (m_counted && m_shared != nullptr)
+        if (m_counted && m_stats != nullptr)
         {
             AcquireSRWLockExclusive(&g_sharedLock);
-            InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_stats->apoInstances));
             ReleaseSRWLockExclusive(&g_sharedLock);
         }
         if (m_endpoint != nullptr) m_endpoint->Release();
@@ -491,14 +527,16 @@ private:
             float cap = ReadFloat(&m_shared->appCapGain);
             if (cap >= 0.0f && cap <= 1.0f) gain *= cap;
         }
-        if (m_shared != nullptr && m_shared->apoSource != source)
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoSource), static_cast<LONG>(source));
+        if (m_stats != nullptr && m_stats->apoSource != source)
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoSource), static_cast<LONG>(source));
         return gain;
     }
 
     volatile LONG m_refs = 1;
+    IUnknown* m_outer = nullptr; // not AddRef'd (aggregation rule)
     IMMDevice* m_endpoint = nullptr;
-    VbShared* m_shared = nullptr;
+    VbShared* m_shared = nullptr; // readable view (may be read-only)
+    VbShared* m_stats = nullptr;  // same view when writable, else null: every write goes through this
     volatile float m_notifGain = 1.0f;
     std::atomic<bool> m_haveNotif{ false };
     float m_gain = 1.0f;
@@ -540,12 +578,16 @@ public:
     {
         if (ppv == nullptr) return E_POINTER;
         *ppv = nullptr;
-        if (outer != nullptr) return CLASS_E_NOAGGREGATION;
-        auto* apo = new (std::nothrow) VolumeBridgeApo();
+        wchar_t g[40];
+        GuidText(riid, g, 40);
+        ApoLog(L"CreateInstance outer=%d riid=%s", outer != nullptr ? 1 : 0, g);
+        // Aggregation: the outer object may only ask for the inner IUnknown.
+        if (outer != nullptr && riid != __uuidof(IUnknown)) return CLASS_E_NOAGGREGATION;
+        auto* apo = new (std::nothrow) VolumeBridgeApo(outer);
         if (apo == nullptr) return E_OUTOFMEMORY;
-        HRESULT hr = apo->QueryInterface(riid, ppv);
-        ApoLog(L"CreateInstance hr=0x%08X", static_cast<unsigned>(hr));
-        apo->Release();
+        HRESULT hr = apo->NonDelegatingQueryInterface(riid, ppv);
+        apo->NonDelegatingRelease();
+        if (FAILED(hr)) ApoLog(L"CreateInstance failed hr=0x%08X", static_cast<unsigned>(hr));
         return hr;
     }
     STDMETHODIMP LockServer(BOOL lock) override

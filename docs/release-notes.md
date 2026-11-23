@@ -4,6 +4,11 @@
 
 `VolumeBridgeSetup.exe.sha256` is used by the in-app updater to verify the download.
 
+### 0.3.3
+- 修复零延迟插件从未生效的根本原因：Windows 音频引擎以 COM 聚合方式创建插件，旧版本拒绝了聚合，插件实际从未被创建（与 Equalizer APO 的实现对比后发现）。 / Root cause fix: the audio engine creates APOs aggregated; earlier versions refused aggregation, so the plugin was never created (found by comparing with Equalizer APO).
+- 音频进程只能读共享文件时，插件改为只读方式获取音量和上限。 / If audiodg may only read the shared file, the plugin still follows the app's volume and ceiling.
+- 升级时先恢复音频服务再设置插件；设置日志改为追加。 / Upgrade starts Windows Audio before plugin setup; setup log appends.
+
 ### 0.3.2
 - 新增“最大音量”设置，默认 -12 dB（滑块 100% 时的实际输出），两种模式都生效。 / New "Maximum volume" setting, default -12 dB at 100 % slider, both modes.
 - 修复零延迟插件不生效：音箱上的旧版音效位（LFX/GFX，例如 Microsoft Audio Home Theater Effects）会让 Windows 忽略新版位置上的插件；现在启用插件时会先移除它们（已备份，卸载时恢复），并重启音频端点服务。 / Fix: legacy LFX/GFX effects on the speaker made Windows ignore the plugin; they are now removed while the plugin is enabled (backed up, restored on uninstall).

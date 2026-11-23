@@ -11,11 +11,11 @@ public sealed class FileLog : IDisposable
     StreamWriter _writer;
     bool _disposed;
 
-    public FileLog(string path, long maxBytes = 2 * 1024 * 1024)
+    public FileLog(string path, long maxBytes = 2 * 1024 * 1024, bool append = false)
     {
         _path = path;
         _maxBytes = maxBytes;
-        _writer = Open(append: false);
+        _writer = Open(append);
     }
 
     public string Path => _path;

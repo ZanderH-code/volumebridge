@@ -232,7 +232,7 @@ static partial class Program
     {
         string logDir = Path.GetDirectoryName(ApoShared.FilePath)!;
         Directory.CreateDirectory(logDir);
-        using var log = new FileLog(Path.Combine(logDir, "apo-setup.log")) { Echo = Console.WriteLine };
+        using var log = new FileLog(Path.Combine(logDir, "apo-setup.log"), append: true) { Echo = Console.WriteLine };
         try
         {
             if (mode == "--apo-remove")

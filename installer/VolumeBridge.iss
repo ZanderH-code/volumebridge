@@ -95,9 +95,9 @@ Name: "{group}\{cm:UninstallProgram,VolumeBridge}"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{sys}\regsvr32.exe"; Parameters: "/s ""{app}\VolumeBridgeApo.dll"""; Flags: runhidden waituntilterminated
-Filename: "{app}\VolumeBridge.exe"; Parameters: "--apo-setup"; Flags: runhidden waituntilterminated; Tasks: apo
-; Make sure audio is running again (it was stopped for the upgrade, or not restarted by --apo-setup).
+; Windows Audio was stopped for the upgrade: start it first, otherwise --apo-setup sees no speakers.
 Filename: "{sys}\net.exe"; Parameters: "start audiosrv"; Flags: runhidden waituntilterminated
+Filename: "{app}\VolumeBridge.exe"; Parameters: "--apo-setup"; Flags: runhidden waituntilterminated; Tasks: apo
 Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"; Description: "{cm:StartApp}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 ; One-click update from the app runs this installer with /SILENT; reopen the app afterwards.
 Filename: "{app}\VolumeBridge.exe"; Parameters: "--updated"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: WizardSilent
