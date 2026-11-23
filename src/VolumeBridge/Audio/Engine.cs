@@ -130,6 +130,7 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         // Positive ppm = buffer too full = Windows sends faster than the speaker plays: slow the
         // emulated USB clock down. 0 while no output is running.
         var server = _server;
+        bridge.TargetGain = (float)SpeakerDevice.Gain(_device.VolumeState.Volume, _device.VolumeState.Mute) * Config.OutputCapGain; // pick up a cap changed during start
         _output = new SpeakerOutput(Config, bridge, ppm => server.Clock.RateScale = 1 + ppm * 1e-6, log);
         _output.Start();
     }

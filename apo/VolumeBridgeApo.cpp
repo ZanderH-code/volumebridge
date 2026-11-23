@@ -18,7 +18,6 @@
 #include <audioenginebaseapo.h>
 #include <audioengineextensionapo.h>
 #include <BaseAudioProcessingObject.h>
-#include <shlobj.h>
 #include <strsafe.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -33,57 +32,21 @@ static HMODULE g_module = nullptr;
 static void ApoLog(const wchar_t* fmt, ...);
 static std::atomic<long> g_objects{ 0 };
 static std::atomic<long> g_locks{ 0 };
+static volatile LONG g_qiMissLogs = 0;
 
 // ---------------------------------------------------------------------------------------------
-// Shared state (file mapping in %ProgramData%\VolumeBridge\apo.dat). Opened once per process.
+// Paths: %ProgramData%\VolumeBridge\<file>, without shell32 (keeps audiodg away from shell COM/RPC).
 // ---------------------------------------------------------------------------------------------
-static SRWLOCK g_sharedLock = SRWLOCK_INIT;
-static VbShared* g_shared = nullptr;
-
-static VbShared* OpenShared()
+static bool DataPath(wchar_t* path, size_t cch, const wchar_t* file)
 {
-    AcquireSRWLockExclusive(&g_sharedLock);
-    if (g_shared == nullptr)
-    {
-        wchar_t path[MAX_PATH];
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)) &&
-            SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\VolumeBridge\\apo.dat")))
-        {
-            HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                      nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (file == INVALID_HANDLE_VALUE) ApoLog(L"shared file open failed: %ls error=%lu", path, GetLastError());
-            if (file != INVALID_HANDLE_VALUE)
-            {
-                HANDLE map = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, VB_SHARED_SIZE, nullptr);
-                CloseHandle(file);
-                if (map != nullptr)
-                {
-                    void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, VB_SHARED_SIZE);
-                    CloseHandle(map); // the view keeps the mapping alive
-                    if (view != nullptr)
-                    {
-                        auto* s = static_cast<VbShared*>(view);
-                        if (s->magic != VB_SHARED_MAGIC)
-                        {
-                            ZeroMemory(s, sizeof(VbShared));
-                            s->version = 1;
-                            s->apoMasterVolume = -1.0f;
-                            InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->magic), static_cast<LONG>(VB_SHARED_MAGIC));
-                        }
-                        g_shared = s; // kept mapped for the life of the process
-                        ApoLog(L"shared state mapped");
-                    }
-                }
-            }
-        }
-    }
-    VbShared* result = g_shared;
-    ReleaseSRWLockExclusive(&g_sharedLock);
-    return result;
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", path, static_cast<DWORD>(cch));
+    if (n == 0 || n >= cch) StringCchCopyW(path, cch, L"C:\\ProgramData");
+    return SUCCEEDED(StringCchCatW(path, cch, L"\\VolumeBridge\\")) && SUCCEEDED(StringCchCatW(path, cch, file));
 }
 
 // ---------------------------------------------------------------------------------------------
-// Diagnostic log (non-real-time paths only): %ProgramData%\VolumeBridge\apo-log.txt, else %TEMP%.
+// Diagnostic log (non-real-time paths only): %ProgramData%\VolumeBridge\apo-log.txt; inside audiodg the
+// fallback is C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp\VolumeBridge-apo-log.txt.
 // ---------------------------------------------------------------------------------------------
 static SRWLOCK g_logLock = SRWLOCK_INIT;
 
@@ -92,21 +55,22 @@ static void ApoLog(const wchar_t* fmt, ...)
     wchar_t msg[512];
     va_list args;
     va_start(args, fmt);
-    StringCchVPrintfW(msg, 512, fmt, args);
+    StringCchVPrintfW(msg, 512, fmt, args); // truncates safely
     va_end(args);
 
     SYSTEMTIME t;
     GetLocalTime(&t);
-    char line[1024];
-    int n = sprintf_s(line, "%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu %ls\r\n", t.wYear, t.wMonth, t.wDay,
-                      t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId(), msg);
-    if (n <= 0) return;
+    wchar_t wline[640];
+    StringCchPrintfW(wline, 640, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu %s\r\n", t.wYear, t.wMonth, t.wDay,
+                     t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId(), msg);
+    char line[2048];
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, wline, -1, line, sizeof line, nullptr, nullptr);
+    if (bytes <= 1) return;
 
     AcquireSRWLockExclusive(&g_logLock);
     wchar_t path[MAX_PATH];
     HANDLE f = INVALID_HANDLE_VALUE;
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)) &&
-        SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\VolumeBridge\\apo-log.txt")))
+    if (DataPath(path, MAX_PATH, L"apo-log.txt"))
         f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE && GetTempPathW(MAX_PATH, path) > 0 && SUCCEEDED(StringCchCatW(path, MAX_PATH, L"VolumeBridge-apo-log.txt")))
         f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -116,11 +80,71 @@ static void ApoLog(const wchar_t* fmt, ...)
         if (GetFileSizeEx(f, &size) && size.QuadPart < 1024 * 1024) // stop at 1 MB
         {
             DWORD written;
-            WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
+            WriteFile(f, line, static_cast<DWORD>(bytes - 1), &written, nullptr);
         }
         CloseHandle(f);
     }
     ReleaseSRWLockExclusive(&g_logLock);
+}
+
+static void GuidText(REFGUID g, wchar_t* out, size_t cch)
+{
+    StringCchPrintfW(out, cch, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", g.Data1, g.Data2, g.Data3,
+                     g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shared state (file mapping in %ProgramData%\VolumeBridge\apo.dat). Opened once per process.
+// ---------------------------------------------------------------------------------------------
+static SRWLOCK g_sharedLock = SRWLOCK_INIT;
+static VbShared* g_shared = nullptr;
+
+static VbShared* OpenShared()
+{
+    DWORD error = 0;
+    const wchar_t* step = nullptr;
+    bool mappedNow = false;
+    AcquireSRWLockExclusive(&g_sharedLock);
+    if (g_shared == nullptr)
+    {
+        wchar_t path[MAX_PATH];
+        HANDLE file = INVALID_HANDLE_VALUE;
+        if (DataPath(path, MAX_PATH, L"apo.dat"))
+            file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) { error = GetLastError(); step = L"CreateFile"; }
+        else
+        {
+            HANDLE map = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, VB_SHARED_SIZE, nullptr);
+            if (map == nullptr) { error = GetLastError(); step = L"CreateFileMapping"; }
+            CloseHandle(file);
+            if (map != nullptr)
+            {
+                void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, VB_SHARED_SIZE);
+                if (view == nullptr) { error = GetLastError(); step = L"MapViewOfFile"; }
+                CloseHandle(map); // the view keeps the mapping alive
+                if (view != nullptr)
+                {
+                    auto* sh = static_cast<VbShared*>(view);
+                    if (sh->magic != VB_SHARED_MAGIC)
+                    {
+                        ZeroMemory(sh, sizeof(VbShared));
+                        sh->version = 1;
+                        sh->apoMasterVolume = -1.0f;
+                        InterlockedExchange(reinterpret_cast<volatile LONG*>(&sh->magic), static_cast<LONG>(VB_SHARED_MAGIC));
+                    }
+                    g_shared = sh; // kept mapped for the life of the process
+                    mappedNow = true;
+                }
+            }
+        }
+    }
+    VbShared* result = g_shared;
+    ReleaseSRWLockExclusive(&g_sharedLock);
+    // Log outside the lock.
+    if (step != nullptr) ApoLog(L"shared state: %s failed, error=%lu", step, error);
+    else if (mappedNow) ApoLog(L"shared state mapped");
+    return result;
 }
 
 static float ReadFloat(volatile float* p)
@@ -178,7 +202,15 @@ public:
         else if (riid == __uuidof(IAudioProcessingObjectNotifications))
             *ppv = static_cast<IAudioProcessingObjectNotifications*>(this);
         else
+        {
+            if (InterlockedIncrement(&g_qiMissLogs) <= 20)
+            {
+                wchar_t g[40];
+                GuidText(riid, g, 40);
+                ApoLog(L"QueryInterface: not supported %s", g);
+            }
             return E_NOINTERFACE;
+        }
         AddRef();
         return S_OK;
     }
@@ -212,21 +244,25 @@ public:
         IMMDeviceCollection* devices = nullptr;
         UINT32 kind = 0;
         BOOL discoveryOnly = FALSE;
-        if (cbDataSize == sizeof(APOInitSystemEffects3))
+        GUID mode = GUID_NULL;
+        const bool sizeOk = cbSize == cbDataSize; // only then is the layout trustworthy
+        if (sizeOk && cbDataSize == sizeof(APOInitSystemEffects3))
         {
             auto* init = reinterpret_cast<APOInitSystemEffects3*>(pbyData);
             devices = init->pDeviceCollection;
             discoveryOnly = init->InitializeForDiscoveryOnly;
+            mode = init->AudioProcessingMode;
             kind = 3;
         }
-        else if (cbDataSize == sizeof(APOInitSystemEffects2))
+        else if (sizeOk && cbDataSize == sizeof(APOInitSystemEffects2))
         {
             auto* init = reinterpret_cast<APOInitSystemEffects2*>(pbyData);
             devices = init->pDeviceCollection;
             discoveryOnly = init->InitializeForDiscoveryOnly;
+            mode = init->AudioProcessingMode;
             kind = 2;
         }
-        else if (cbDataSize == sizeof(APOInitSystemEffects))
+        else if (sizeOk && cbDataSize == sizeof(APOInitSystemEffects))
         {
             kind = 1;
         }
@@ -242,7 +278,9 @@ public:
 
         // Discovery-only instances (e.g. created by Settings to list effects) never process audio:
         // keep them away from the shared state the running instance reports through.
-        ApoLog(L"Initialize kind=%u discoveryOnly=%d endpoint=%d", kind, discoveryOnly ? 1 : 0, m_endpoint != nullptr ? 1 : 0);
+        wchar_t modeText[40];
+        GuidText(mode, modeText, 40);
+        ApoLog(L"Initialize kind=%u discoveryOnly=%d endpoint=%d mode=%s", kind, discoveryOnly ? 1 : 0, m_endpoint != nullptr ? 1 : 0, modeText);
         if (!discoveryOnly)
         {
             m_shared = OpenShared();
@@ -251,6 +289,17 @@ public:
 
         m_bIsInitialized = true;
         return S_OK;
+    }
+
+    STDMETHODIMP IsInputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
+                                        IAudioMediaType** ppSupportedInputFormat) override
+    {
+        HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(pOppositeFormat, pRequestedInputFormat, ppSupportedInputFormat);
+        UNCOMPRESSEDAUDIOFORMAT f{};
+        if (pRequestedInputFormat != nullptr) pRequestedInputFormat->GetUncompressedAudioFormat(&f);
+        ApoLog(L"IsInputFormatSupported hr=0x%08X rate=%u ch=%u container=%u valid=%u", static_cast<unsigned>(hr),
+               static_cast<unsigned>(f.fFramesPerSecond), f.dwSamplesPerFrame, f.dwBytesPerSampleContainer, f.dwValidBitsPerSample);
+        return hr;
     }
 
     STDMETHODIMP LockForProcess(UINT32 nIn, APO_CONNECTION_DESCRIPTOR** ppIn,
@@ -356,6 +405,7 @@ public:
     STDMETHODIMP GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects, HANDLE) override
     {
         if (ppEffectsIds == nullptr || pcEffects == nullptr) return E_POINTER;
+        ApoLog(L"GetEffectsList");
         *ppEffectsIds = nullptr;
         *pcEffects = 0;
         return S_OK;
@@ -363,6 +413,7 @@ public:
     STDMETHODIMP GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE) override
     {
         if (effects == nullptr || numEffects == nullptr) return E_POINTER;
+        ApoLog(L"GetControllableSystemEffectsList");
         *effects = nullptr;
         *numEffects = 0;
         return S_OK;
@@ -396,7 +447,7 @@ public:
         const bool muted = n->audioEndpointVolumeChange.volume->bMuted != FALSE;
         WriteFloat(&m_notifGain, GainFromSlider(master, muted));
         if (!m_haveNotif.exchange(true, std::memory_order_acq_rel))
-            ApoLog(L"first volume notification: master=%.3f muted=%d", master, muted ? 1 : 0);
+            ApoLog(L"first volume notification: master=%u%% muted=%d", static_cast<unsigned>(master * 100 + 0.5f), muted ? 1 : 0);
         if (m_shared != nullptr)
         {
             WriteFloat(&m_shared->apoMasterVolume, master);
@@ -493,6 +544,7 @@ public:
         auto* apo = new (std::nothrow) VolumeBridgeApo();
         if (apo == nullptr) return E_OUTOFMEMORY;
         HRESULT hr = apo->QueryInterface(riid, ppv);
+        ApoLog(L"CreateInstance hr=0x%08X", static_cast<unsigned>(hr));
         apo->Release();
         return hr;
     }

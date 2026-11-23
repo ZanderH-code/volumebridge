@@ -6,7 +6,8 @@
 
 ### 0.3.2
 - 新增“最大音量”设置，默认 -12 dB（滑块 100% 时的实际输出），两种模式都生效。 / New "Maximum volume" setting, default -12 dB at 100 % slider, both modes.
-- 零延迟插件：遇到较新 Windows 传入的未知初始化结构不再拒绝工作；新增诊断日志 C:\ProgramData\VolumeBridge\apo-log.txt。 / Zero-latency plugin no longer refuses unknown (newer) initialization structures; diagnostic log added.
+- 修复零延迟插件不生效：音箱上的旧版音效位（LFX/GFX，例如 Microsoft Audio Home Theater Effects）会让 Windows 忽略新版位置上的插件；现在启用插件时会先移除它们（已备份，卸载时恢复），并重启音频端点服务。 / Fix: legacy LFX/GFX effects on the speaker made Windows ignore the plugin; they are now removed while the plugin is enabled (backed up, restored on uninstall).
+- 插件诊断日志 C:\ProgramData\VolumeBridge\apo-log.txt；遇到未知的初始化结构不再拒绝工作。 / Plugin diagnostic log; unknown initialization structures no longer rejected.
 
 ### 0.3.1
 - 修复：安装时和“启用插件”按钮无法完成插件设置（无控制台时设置编码出错，且没有留下日志）。 / Fix: enabling the plugin from the installer or the window failed silently (console encoding set without a console).

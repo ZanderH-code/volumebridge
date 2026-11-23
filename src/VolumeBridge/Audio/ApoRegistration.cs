@@ -29,6 +29,10 @@ public static partial class ApoRegistration
     const string ModeDefault = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
     const string NoBackupMarker = "__VolumeBridge_NoFxProperties";
     const string FxAssociation = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},0"; // PKEY_FX_Association
+    // Legacy (Windows 7 style) PKEY_FX_PreMixEffectClsid / PKEY_FX_PostMixEffectClsid. While either is present,
+    // Windows builds the legacy LFX/GFX chain and ignores SFX/MFX/EFX (Equalizer APO removes them for that reason).
+    const string LegacyLfx = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1";
+    const string LegacyGfx = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2";
     const string DisableSysFx = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";   // PKEY_AudioEndpoint_Disable_SysFx
 
     /// <summary>A CLSID string, or null for blank / all-zero entries.</summary>
@@ -55,6 +59,7 @@ public static partial class ApoRegistration
     {
         using var fx = Registry.LocalMachine.OpenSubKey($@"{RenderRoot}\{KeyName(endpointId)}\FxProperties");
         if (fx is null) return false;
+        if (fx.GetValue(LegacyLfx) is not null || fx.GetValue(LegacyGfx) is not null) return false; // EFX would be ignored
         if (string.Equals(fx.GetValue(EfxSingle) as string, ApoClsid, StringComparison.OrdinalIgnoreCase)) return true;
         return fx.GetValue(EfxComposite) is string[] list && list.Any(c => string.Equals(c, ApoClsid, StringComparison.OrdinalIgnoreCase));
     }
@@ -135,6 +140,13 @@ public static partial class ApoRegistration
         Backup(guid, endpoint, log);
 
         using var fx = endpoint.CreateSubKey("FxProperties", writable: true);
+        Dump(fx, $"FxProperties of {guid} before", log);
+        foreach (var legacy in new[] { LegacyLfx, LegacyGfx })
+        {
+            if (fx.GetValue(legacy) is null) continue;
+            fx.DeleteValue(legacy, throwOnMissingValue: false); // original kept in the backup, restored on removal
+            log($"removed legacy effect {legacy} (Windows ignores EFX while it exists)");
+        }
         string? single = RealClsid(fx.GetValue(EfxSingle) as string);
         if (fx.GetValue(EfxComposite) is string[] composite)
         {
@@ -157,7 +169,24 @@ public static partial class ApoRegistration
             fx.SetValue(FxAssociation, "{00000000-0000-0000-0000-000000000000}", RegistryValueKind.String); // KSNODETYPE_ANY
         if (fx.GetValue(EfxModes) is not string[] modes || !modes.Contains(ModeDefault, StringComparer.OrdinalIgnoreCase))
             fx.SetValue(EfxModes, (fx.GetValue(EfxModes) as string[] ?? []).Append(ModeDefault).ToArray(), RegistryValueKind.MultiString);
+        Dump(fx, $"FxProperties of {guid} after", log);
         log($"APO added to endpoint {guid}");
+    }
+
+    static void Dump(RegistryKey fx, string title, Action<string> log)
+    {
+        log(title + ":");
+        foreach (var name in fx.GetValueNames())
+        {
+            object? v = fx.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            string text = v switch
+            {
+                string[] a => string.Join(" | ", a),
+                byte[] b => Convert.ToHexString(b.Length > 32 ? b[..32] : b) + (b.Length > 32 ? "…" : ""),
+                _ => v?.ToString() ?? "",
+            };
+            log($"  {name} [{fx.GetValueKind(name)}] = {text}");
+        }
     }
 
     /// <summary>Saves FxProperties exactly once (the original state), or a marker if it did not exist.</summary>
@@ -227,7 +256,10 @@ public static partial class ApoRegistration
     /// <summary>Restarts the Windows Audio service so audiodg reloads the effect chain (sound pauses ~2 s).</summary>
     public static void RestartAudioService(Action<string> log)
     {
+        // The endpoint builder caches endpoint effect settings; restart it too (this also stops audiosrv).
         RunNet("stop audiosrv /y", log);
+        RunNet("stop AudioEndpointBuilder /y", log);
+        RunNet("start AudioEndpointBuilder", log);
         RunNet("start audiosrv", log);
     }
 
