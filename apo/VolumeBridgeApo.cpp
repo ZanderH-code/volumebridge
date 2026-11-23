@@ -319,7 +319,7 @@ public:
         if (!discoveryOnly)
         {
             m_shared = OpenShared();
-            m_stats = g_sharedWritable ? m_shared : nullptr;
+            m_stats = (m_shared != nullptr && g_sharedWritable) ? m_shared : nullptr; // flag is fixed once mapped
             if (m_stats != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_stats->apoInitKind), static_cast<LONG>(kind == 0 ? 9 : kind));
         }
 
