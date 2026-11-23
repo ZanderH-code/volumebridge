@@ -1,10 +1,12 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
 using Microsoft.Win32;
+using VolumeBridge.Core;
 
 namespace VolumeBridge.Audio;
 
@@ -14,7 +16,7 @@ namespace VolumeBridge.Audio;
 /// Administrators get write access (same approach as Equalizer APO's configurator). The original
 /// FxProperties values are backed up once and restored on removal.
 /// </summary>
-public static partial class ApoRegistration
+public static class ApoRegistration
 {
     public const string ApoClsid = "{B2800674-8C35-428D-A3EA-750171E7DD5C}";
 
@@ -22,6 +24,16 @@ public static partial class ApoRegistration
     const string BackupRoot = @"SOFTWARE\VolumeBridge\FxBackup";
     const string StateKey = @"SOFTWARE\VolumeBridge";
     const string AudioKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Audio";
+    const string LegacyUninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C2B7E-4A0B-4D8E-9C55-5642B0A1D001}_is1";
+    const string ApoResourceName = "VolumeBridgeApo.dll";
+    const uint MoveFileDelayUntilReboot = 0x4;
+
+    static readonly Lazy<string?> EmbeddedApoHash = new(ComputeEmbeddedApoSha256);
+    static readonly object HashCacheGate = new();
+    static string? _cachedFilePath;
+    static DateTime _cachedFileMtime;
+    static long _cachedFileLen;
+    static string? _cachedFileHash;
 
     // PKEY_FX_EndpointEffectClsid, PKEY_CompositeFX_EndpointEffectClsid, PKEY_EFX_ProcessingModes_Supported_For_Streaming
     const string EfxSingle = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},7";
@@ -38,7 +50,7 @@ public static partial class ApoRegistration
 
     /// <summary>A CLSID string, or null for blank / all-zero entries.</summary>
     static string? RealClsid(string? s) =>
-        string.IsNullOrWhiteSpace(s) || !Guid.TryParse(s, out var g) || g == Guid.Empty ? null : s.Trim();
+        string.IsNullOrWhiteSpace(s) || !Guid.TryParse(s, out var g) || g == Guid.Empty ? null : s!.Trim();
 
     /// <summary>"Audio enhancements: Off" for this endpoint (stored in FxProperties). Readable unelevated.</summary>
     public static bool EnhancementsDisabled(string endpointId)
@@ -53,7 +65,7 @@ public static partial class ApoRegistration
     }
 
     /// <summary>"{0.0.0.00000000}.{guid}" → "{guid}" (the registry key name).</summary>
-    public static string KeyName(string endpointId) => endpointId[(endpointId.LastIndexOf('.') + 1)..];
+    public static string KeyName(string endpointId) => endpointId.Substring(endpointId.LastIndexOf('.') + 1);
 
     /// <summary>True when the endpoint's EFX slot (single or composite) contains our APO. Readable unelevated.</summary>
     public static bool IsRegistered(string endpointId)
@@ -73,10 +85,246 @@ public static partial class ApoRegistration
     }
 
     /// <summary>True when the APO's COM class is registered (regsvr32 ran).</summary>
-    public static bool ComRegistered()
+    public static bool ComRegistered() => GetRegisteredApoPath() is string path && File.Exists(path);
+
+    /// <summary>Path of the registered APO DLL from InprocServer32, or null if not registered.</summary>
+    public static string? GetRegisteredApoPath()
     {
         using var k = Registry.LocalMachine.OpenSubKey($@"SOFTWARE\Classes\CLSID\{ApoClsid}\InprocServer32");
-        return k?.GetValue(null) is string path && File.Exists(path);
+        string? path = k?.GetValue(null) as string;
+        return string.IsNullOrWhiteSpace(path) ? null : path!.Trim().Trim('"');
+    }
+
+    /// <summary>True when the old Inno Setup installation (0.4.0 and earlier) is still installed. Readable unelevated.</summary>
+    public static bool IsLegacyInstallerPresent()
+    {
+        try
+        {
+            using var hklm64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using var k = hklm64.OpenSubKey(LegacyUninstallKey);
+            return k is not null;
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>True when the registered APO DLL differs from the one embedded in this exe.</summary>
+    public static bool IsPluginOutdated()
+    {
+        string? embedded = EmbeddedApoHash.Value;
+        if (embedded is null) return false;
+        string? regPath = GetRegisteredApoPath();
+        if (regPath is null || !File.Exists(regPath)) return false;
+        string? actual = GetCachedFileSha256(regPath);
+        return actual is not null && !string.Equals(actual, embedded, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True when any plugin registration, backup, or deployed DLL is present on the machine.</summary>
+    public static bool IsAnyPluginInstalled()
+    {
+        if (ComRegistered()) return true;
+        try
+        {
+            using var state = Registry.LocalMachine.OpenSubKey(StateKey);
+            if (state is not null)
+            {
+                if (state.GetValue("PrevDisableProtectedAudioDG") is not null) return true;
+                using var backup = state.OpenSubKey("FxBackup");
+                if (backup is not null && backup.SubKeyCount > 0) return true;
+            }
+            string dir = PluginInstallDir;
+            if (Directory.Exists(dir) && EnumeratePluginDlls(dir).Any()) return true;
+        }
+        catch (Exception) { }
+        return false;
+    }
+
+    public static string PluginInstallDir =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VolumeBridge");
+
+    /// <summary>
+    /// Elevated: extract the embedded APO DLL to %ProgramFiles%\VolumeBridge\VolumeBridgeApo-&lt;8hex&gt;.dll,
+    /// register it with regsvr32, and ensure %ProgramData%\VolumeBridge is writable by Everyone.
+    /// Returns the deployed DLL path.
+    /// </summary>
+    public static string DeployAndRegisterDll(Action<string> log)
+    {
+        EnsureProgramDataWritable(log);
+
+        byte[] bytes = ReadEmbeddedApoBytes()
+            ?? throw new InvalidOperationException("This build does not contain an embedded VolumeBridgeApo.dll.");
+        string hash = UpdateCheck.Sha256Hex(bytes);
+        string dir = PluginInstallDir;
+        Directory.CreateDirectory(dir);
+        string dllPath = Path.Combine(dir, $"VolumeBridgeApo-{hash.Substring(0, 8)}.dll");
+
+        if (File.Exists(dllPath) && string.Equals(UpdateCheck.Sha256FileHex(dllPath), hash, StringComparison.OrdinalIgnoreCase))
+        {
+            log($"APO DLL already up to date: {dllPath}");
+        }
+        else
+        {
+            File.WriteAllBytes(dllPath, bytes);
+            log($"extracted APO DLL ({bytes.Length} bytes, sha256={hash.Substring(0, 8)}): {dllPath}");
+        }
+
+        RunRegsvr32(dllPath, unregister: false, log);
+        return dllPath;
+    }
+
+    /// <summary>Best-effort cleanup of old APO DLLs in %ProgramFiles%\VolumeBridge except <paramref name="keepPath"/>.</summary>
+    public static void CleanupOldDlls(string? keepPath, bool removeDirIfEmpty, Action<string> log)
+    {
+        string dir = PluginInstallDir;
+        if (!Directory.Exists(dir)) return;
+        string? keepFull = keepPath is null ? null : Path.GetFullPath(keepPath);
+        foreach (string f in EnumeratePluginDlls(dir).ToList())
+        {
+            if (keepFull is not null && string.Equals(Path.GetFullPath(f), keepFull, StringComparison.OrdinalIgnoreCase))
+                continue;
+            DeleteOrDelayReboot(f, log);
+        }
+        if (removeDirIfEmpty)
+        {
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(dir).Any())
+                {
+                    Directory.Delete(dir);
+                    log($"removed empty directory: {dir}");
+                }
+            }
+            catch (Exception e) { log($"could not remove {dir}: {e.Message}"); }
+        }
+    }
+
+    /// <summary>Elevated: restore audio settings, unregister the COM DLL, delete plugin DLLs and empty state key.</summary>
+    public static void FullRemove(Action<string> log)
+    {
+        string? regPath = GetRegisteredApoPath();
+        RemoveAll(log);
+
+        if (regPath is not null && File.Exists(regPath))
+        {
+            try { RunRegsvr32(regPath, unregister: true, log); }
+            catch (Exception e) { log($"regsvr32 /u failed (continuing): {e.Message}"); }
+        }
+
+        CleanupOldDlls(keepPath: null, removeDirIfEmpty: true, log);
+        DeleteStateKeyIfEmpty(log);
+    }
+
+    static IEnumerable<string> EnumeratePluginDlls(string dir)
+    {
+        foreach (string f in Directory.EnumerateFiles(dir, "VolumeBridgeApo-*.dll")) yield return f;
+        string unversioned = Path.Combine(dir, "VolumeBridgeApo.dll");
+        if (File.Exists(unversioned)) yield return unversioned;
+    }
+
+    static void DeleteOrDelayReboot(string path, Action<string> log)
+    {
+        try
+        {
+            File.Delete(path);
+            log($"deleted old DLL: {path}");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            if (MoveFileExW(path, null, MoveFileDelayUntilReboot))
+                log($"DLL in use, scheduled delete on reboot: {path}");
+            else
+                log($"could not delete or schedule delete for {path}: win32={Marshal.GetLastWin32Error()}");
+        }
+    }
+
+    static void RunRegsvr32(string dllPath, bool unregister, Action<string> log)
+    {
+        string regsvr = Path.Combine(Environment.SystemDirectory, "regsvr32.exe");
+        string args = unregister ? $"/u /s \"{dllPath}\"" : $"/s \"{dllPath}\"";
+        using var p = Process.Start(new ProcessStartInfo(regsvr, args)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        })!;
+        if (!p.WaitForExit(30_000))
+        {
+            try { p.Kill(); } catch (Exception) { }
+            throw new InvalidOperationException($"regsvr32 {args} timed out");
+        }
+        log($"regsvr32 {args} -> exit {p.ExitCode}");
+        if (p.ExitCode != 0)
+            throw new InvalidOperationException($"regsvr32 {args} failed with exit code {p.ExitCode}");
+    }
+
+    static void EnsureProgramDataWritable(Action<string> log)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(ApoShared.FilePath)!;
+            Directory.CreateDirectory(dir);
+            var di = new DirectoryInfo(dir);
+            var sec = di.GetAccessControl();
+            var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            sec.AddAccessRule(new FileSystemAccessRule(everyone, FileSystemRights.Modify,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+            di.SetAccessControl(sec);
+        }
+        catch (Exception e) { log($"could not set ProgramData ACL (continuing): {e.Message}"); }
+    }
+
+    static void DeleteStateKeyIfEmpty(Action<string> log)
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(StateKey);
+            if (k is null) return;
+            if (k.SubKeyCount == 0 && k.ValueCount == 0)
+            {
+                Registry.LocalMachine.DeleteSubKey(StateKey, throwOnMissingSubKey: false);
+                log($@"removed empty HKLM\{StateKey}");
+            }
+        }
+        catch (Exception e) { log($@"could not clean HKLM\{StateKey}: {e.Message}"); }
+    }
+
+    static byte[]? ReadEmbeddedApoBytes()
+    {
+        using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(ApoResourceName);
+        if (s is null) return null;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    static string? ComputeEmbeddedApoSha256()
+    {
+        byte[]? bytes = ReadEmbeddedApoBytes();
+        return bytes is null ? null : UpdateCheck.Sha256Hex(bytes);
+    }
+
+    static string? GetCachedFileSha256(string path)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return null;
+            DateTime mtime = fi.LastWriteTimeUtc;
+            long len = fi.Length;
+            lock (HashCacheGate)
+            {
+                if (_cachedFilePath == path && _cachedFileMtime == mtime && _cachedFileLen == len && _cachedFileHash is not null)
+                    return _cachedFileHash;
+            }
+            string hash = UpdateCheck.Sha256FileHex(path);
+            lock (HashCacheGate)
+            {
+                _cachedFilePath = path;
+                _cachedFileMtime = mtime;
+                _cachedFileLen = len;
+                _cachedFileHash = hash;
+            }
+            return hash;
+        }
+        catch (Exception) { return null; }
     }
 
     /// <summary>Elevated: allow unsigned APOs (remembering the previous value) and add our APO to the endpoints.</summary>
@@ -183,7 +431,7 @@ public static partial class ApoRegistration
             string text = v switch
             {
                 string[] a => string.Join(" | ", a),
-                byte[] b => Convert.ToHexString(b.Length > 32 ? b[..32] : b) + (b.Length > 32 ? "…" : ""),
+                byte[] b => BitConverter.ToString(b, 0, Math.Min(b.Length, 32)).Replace("-", "") + (b.Length > 32 ? "…" : ""),
                 _ => v?.ToString() ?? "",
             };
             log($"  {name} [{fx.GetValueKind(name)}] = {text}");
@@ -268,7 +516,7 @@ public static partial class ApoRegistration
         audio.Refresh();
         if (audio.Status != ServiceControllerStatus.Stopped)
         {
-            try { audio.Stop(stopDependentServices: true); } catch (InvalidOperationException e) { log($"stop: {e.Message}"); }
+            try { audio.Stop(); } catch (InvalidOperationException e) { log($"stop: {e.Message}"); }
             try { audio.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30)); }
             catch (System.ServiceProcess.TimeoutException) { log("Audiosrv did not stop within 30 s"); }
         }
@@ -310,8 +558,8 @@ public static partial class ApoRegistration
         {
             if (!LookupPrivilegeValueW(null, name, out long luid)) throw new Win32Exception();
             var tp = new TokenPrivileges { Count = 1, Luid = luid, Attributes = 0x2 }; // SE_PRIVILEGE_ENABLED
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastPInvokeError() != 0)
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"cannot enable {name} (run as administrator)");
+            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), $"cannot enable {name} (run as administrator)");
         }
         finally { CloseHandle(token); }
     }
@@ -324,23 +572,27 @@ public static partial class ApoRegistration
         public int Attributes;
     }
 
-    [LibraryImport("kernel32.dll")]
-    private static partial IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool CloseHandle(IntPtr h);
+    private static extern bool CloseHandle(IntPtr h);
 
-    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
+    private static extern bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
 
-    [LibraryImport("advapi32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool LookupPrivilegeValueW(string? system, string name, out long luid);
+    private static extern bool LookupPrivilegeValueW(string? system, string name, out long luid);
 
-    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AdjustTokenPrivileges(IntPtr token, [MarshalAs(UnmanagedType.Bool)] bool disableAll,
+    private static extern bool AdjustTokenPrivileges(IntPtr token, [MarshalAs(UnmanagedType.Bool)] bool disableAll,
         ref TokenPrivileges newState, int bufferLength, IntPtr previous, IntPtr returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveFileExW(string existingFileName, string? newFileName, uint flags);
 }

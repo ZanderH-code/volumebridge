@@ -52,24 +52,32 @@ jobs:
           }
 
       - run: dotnet test tests/VolumeBridge.Tests -c Release
-      - run: dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
 
-      - name: Build installer
+      - name: Build single exe
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "/DPayloadDir=$PWD\out" "/O$PWD\installer\output" installer\VolumeBridge.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
-          $h = (Get-FileHash installer\output\VolumeBridgeSetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$h  VolumeBridgeSetup.exe" | Set-Content -NoNewline -Encoding ascii installer\output\VolumeBridgeSetup.exe.sha256
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          dotnet build src/VolumeBridge -c Release "-p:ApoDll=$PWD\out\VolumeBridgeApo.dll" -p:RequireApo=true -o dist
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
+          $files = @(Get-ChildItem -Force dist)
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'VolumeBridge.exe') {
+            $names = ($files | ForEach-Object Name) -join ', '
+            throw "dist must contain only VolumeBridge.exe, found: $names"
+          }
+          $size = $files[0].Length
+          "VolumeBridge.exe size: $size bytes ($([math]::Round($size / 1KB, 1)) KB / $([math]::Round($size / 1MB, 2)) MB)"
+          if ($size -gt 5MB) {
+            throw "VolumeBridge.exe is $size bytes, exceeding the 5 MB limit"
+          }
+          $h = (Get-FileHash dist\VolumeBridge.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$h  VolumeBridge.exe" | Set-Content -NoNewline -Encoding ascii dist\VolumeBridge.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VolumeBridgeSetup
+          name: VolumeBridge
           path: |
-            installer/output/VolumeBridgeSetup.exe
-            installer/output/VolumeBridgeSetup.exe.sha256
+            dist/VolumeBridge.exe
+            dist/VolumeBridge.exe.sha256
           if-no-files-found: error
 
       - name: Publish release
@@ -78,5 +86,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME installer/output/VolumeBridgeSetup.exe installer/output/VolumeBridgeSetup.exe.sha256 `
+          gh release create $env:GITHUB_REF_NAME dist/VolumeBridge.exe dist/VolumeBridge.exe.sha256 `
             --title "VolumeBridge $env:GITHUB_REF_NAME" --notes-file docs/release-notes.md --verify-tag

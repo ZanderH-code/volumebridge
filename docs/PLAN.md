@@ -1,5 +1,7 @@
 # VolumeBridge 实施计划
 
+> **现状（0.5.0）**：改为基于 Windows 10 1903+/11 自带 .NET Framework 4.8 的**绿色单文件 `VolumeBridge.exe`**（内置 NAudio 与 `VolumeBridgeApo.dll`，移除 Inno Setup 安装包），支持程序内直接部署/更新/移除插件与原地自更新。
+>
 > **现状（0.4.0）**：产品只保留**零延迟 APO 模式**（`apo/VolumeBridgeApo.cpp`，音箱端点效果 EFX），已在 JBL Flip 6 + Windows 11 26H2 上实测可用。下文的 v3 虚拟音箱方案（USB/IP + UAC1）曾作为 0.2.x–0.3.x 的"兼容模式"发布，0.4.0 起已移除，代码保留在 Git 历史中（标签 v0.3.3 及以前）。
 >
 > APO 调试中的关键经验：

@@ -23,31 +23,33 @@ VolumeBridge 在 Windows 音频引擎内部、声音发往音箱之前，按系�
 
 ## 安装与使用
 
-**系统要求：** Windows 10（1903 及以上）或 Windows 11，64 位（x64）。安装时需要管理员权限，平时以普通权限运行。
+**系统要求：** Windows 10（1903 及以上）或 Windows 11，64 位（x64）。绿色单文件，无需安装。启用或移除插件时需要一次管理员（UAC）确认，平时以普通权限运行。
+
+> **从 0.4.0 及更早版本升级：** 请先在 **设置 → 应用** 中卸载旧的安装版，再运行新版 `VolumeBridge.exe`。
 
 1. **把音箱切到 USB 音频模式**并连上电脑。JBL Flip 6 的操作是同时按住**蓝牙键 + 播放键约 10 秒**（其他型号请按对应方式操作）。如果正在运行 Voicemeeter，**请先退出**，避免它独占音箱。
-2. **下载并运行 `VolumeBridgeSetup.exe`**（前往 [最新 Release](https://github.com/ZanderH-code/volumebridge/releases/latest)）。安装时保持勾选**“现在为音箱启用零延迟音量插件”**。过程中 Windows 声音会中断约 2 秒。
-3. **打开 VolumeBridge**，点击**设为默认输出**。
-4. **确认生效并设置自启：** 播放任意声音，看到窗口显示 **● 正在工作（零延迟）** 即表示生效；勾选**开机自动启动**即可。
+2. **下载并运行 `VolumeBridge.exe`**（前往 [最新 Release](https://github.com/ZanderH-code/volumebridge/releases/latest)，放在任意文件夹即可）。由于程序未做代码签名，Windows SmartScreen 可能会弹出提示，点击**更多信息 → 仍要运行**即可。
+3. **点击启用插件**（一次 UAC 管理员确认）。过程中 Windows 声音会中断约 2 秒。
+4. **点击设为默认输出**，播放任意声音确认窗口显示 **● 正在工作（零延迟）**，再勾选**开机自动启动**即可。
 
 ### 日常使用
 
 - **最大音量上限：** 默认 **-12 dB**，避免滑块拉满时震耳欲聋；可在窗口中自由调节（**0 到 -30 dB**）。
 - **输出设备选择：** 默认自动匹配名称包含 `JBL` 或 `Zgmicro` 的播放设备，也可以在下拉框里手动指定其他设备。
 - **窗口与托盘：** 关闭窗口后会隐藏到系统托盘继续运行，不占任务栏。
-- **界面语言：** 支持简体中文 / English，安装时选择，也可以在程序里随时切换。
-- **检查更新：** 支持从 GitHub Releases 一键更新（下载包会做 SHA-256 校验）。
-- **干净卸载：** 在“设置 → 应用”中卸载 VolumeBridge 时，会自动恢复所有被修改的 Windows 音频设置。
+- **界面语言：** 默认跟随 Windows 显示语言，也可在程序里随时切换简体中文 / English。
+- **检查更新：** 支持从 GitHub Releases 一键原地更新（下载文件会做 SHA-256 校验）。
+- **干净卸载：** 在窗口中点击**移除插件**（会自动恢复所有被修改的 Windows 音频设置并取消开机自启），然后退出并删除 `VolumeBridge.exe` 即可。
 
 ## 代价与排障
 
-零延迟模式需要改动一项 Windows 音频设置以加载插件，安装前请了解以下几点：
+零延迟模式需要改动一项 Windows 音频设置以加载插件，启用前请了解以下几点：
 
 - **需要关闭受保护音频路径（`DisableProtectedAudioDG=1`）：** 插件未经微软签名，Windows 需要关闭此项才能加载它（Equalizer APO 也是同样做法）。少数 DRM 播放器（如部分受保护的 4K 音频流）可能受影响。
 - **保持“音频增强”开启：** 在 **设置 → 系统 → 声音 → 该音箱** 中，**音频增强**必须保持为**设备默认效果**。如果改成“关”，Windows 会跳过插件。
 - **独占模式会绕过插件：** 以 WASAPI 独占模式播放的程序不经过 Windows 音频引擎，音量插件不会生效。
 - **换 USB 口或 Windows 大版本更新：** 换插 USB 口或升级 Windows 大版本后，插件设置可能被重置。窗口会提示状态异常，点一下**启用插件**即可恢复。
-- **如果装完后没声音：** 直接在**设置 → 应用**中卸载 VolumeBridge（会还原所有设置），或者把该音箱的**音频增强**改成**关**。
+- **如果启用后没声音：** 在 VolumeBridge 中点击**移除插件**（会还原所有设置），或者把该音箱的**音频增强**改成**关**。
 
 ## 兼容性与支持设备
 
@@ -94,16 +96,20 @@ Voicemeeter 需要经过虚拟声卡再二次输出，会引入延迟、占用�
 | `maxOutputDb` | `-12` | 滑块 100% 时的输出上限（dB），`0` 表示音箱原始最大音量 |
 | `outputKeywords` | `["JBL", "Zgmicro"]` | 自动识别输出设备的名称关键字（不区分大小写） |
 | `outputDeviceId` | `null` | 固定指定的输出设备 ID（由界面下拉框写入） |
-| `language` | `"auto"` | `"zh"` / `"en"`，`"auto"` 跟随安装时的语言选择 |
+| `language` | `"auto"` | `"zh"` / `"en"`，`"auto"` 跟随 Windows 显示语言 |
 
 ## 从源码构建
 
 ```powershell
+# 1. 构建 C++ APO 插件（在 Visual Studio x64 开发者命令提示符中）
+./apo/build.ps1 -Out "$PWD\out"
+
+# 2. 运行测试并构建绿色单文件 exe（.NET Framework 4.8）
 dotnet test tests/VolumeBridge.Tests
-dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
+dotnet build src/VolumeBridge -c Release "-p:ApoDll=$PWD\out\VolumeBridgeApo.dll" -p:RequireApo=true -o dist
 ```
 
-GitHub Actions（`.github/workflows/build.yml`）会在 Windows 上构建 C++ 音量插件（`apo/`）与 Inno Setup 安装包，并在推送 `v*` 标签时自动发布 Release。设计思路与评审记录见 [docs/PLAN.md](docs/PLAN.md)。
+GitHub Actions（`.github/workflows/build.yml`）会在 Windows 上构建 C++ 音量插件（`apo/`）并嵌入单个绿色版 `VolumeBridge.exe`，并在推送 `v*` 标签时自动发布 Release。设计思路与评审记录见 [docs/PLAN.md](docs/PLAN.md)。
 
 ## 致谢与许可
 

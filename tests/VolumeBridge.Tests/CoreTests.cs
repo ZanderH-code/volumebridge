@@ -30,26 +30,49 @@ public class AppConfigTests
     [Fact]
     public void ReadsOlderConfigs_IgnoringRemovedSettings()
     {
-        var json = "{ // 0.3.x config\n \"mode\": \"virtual\", \"usbipPort\": 3240, \"outputKeywords\": [\"Flip\"], \"maxOutputDb\": -20, }";
+        var json = "{ // 0.3.x / 0.4.0 config\n \"mode\": \"virtual\", \"usbipPort\": 3240, \"outputKeywords\": [\"Flip\"], \"maxOutputDb\": -20, \"language\": \"zh\", }";
         var c = AppConfig.FromJson(json);
         Assert.Equal(["Flip"], c.OutputKeywords);
         Assert.Equal(-20, c.MaxOutputDb);
+        Assert.Equal("zh", c.Language);
         Assert.Equal(0.1f, c.OutputCapGain, 3);
         Assert.DoesNotContain("outputCapGain", c.ToJson(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RoundTripsAllFields_AndPreservesDefaults()
+    {
+        var original = new AppConfig
+        {
+            OutputKeywords = ["JBL", "DAC \"USB\""],
+            OutputDeviceId = "{0.0.0.00000000}.{12345678-1234-1234-1234-123456789abc}",
+            MaxOutputDb = -15.5,
+            Language = "en",
+        };
+        string json = original.ToJson();
+        Assert.DoesNotContain("outputCapGain", json, StringComparison.OrdinalIgnoreCase);
+
+        var parsed = AppConfig.FromJson(json);
+        Assert.Equal(original.OutputKeywords, parsed.OutputKeywords);
+        Assert.Equal(original.OutputDeviceId, parsed.OutputDeviceId);
+        Assert.Equal(original.MaxOutputDb, parsed.MaxOutputDb);
+        Assert.Equal(original.Language, parsed.Language);
+
+        var empty = AppConfig.FromJson("{}");
+        Assert.Equal(["JBL", "Zgmicro"], empty.OutputKeywords);
+        Assert.Null(empty.OutputDeviceId);
+        Assert.Equal(-12, empty.MaxOutputDb);
+        Assert.Equal("auto", empty.Language);
     }
 }
 
 public class AppPathsTests
 {
     [Fact]
-    public void ProgramFilesInstall_UsesLocalAppData_PortableUsesExeDir()
+    public void AlwaysUsesLocalAppData()
     {
-        string pf = Path.Combine(Path.GetTempPath(), "pf");
         string lad = Path.Combine(Path.GetTempPath(), "lad");
-        Assert.Equal(Path.Combine(lad, "VolumeBridge"), AppPaths.DataDir(Path.Combine(pf, "VolumeBridge") + Path.DirectorySeparatorChar, [null, pf], lad));
-
-        string portable = Path.Combine(Path.GetTempPath(), "pfx", "VolumeBridge");
-        Assert.Equal(portable, AppPaths.DataDir(portable, [pf], lad)); // "pfx" is not under "pf"
+        Assert.Equal(Path.Combine(lad, "VolumeBridge"), AppPaths.DataDir(lad));
     }
 }
 
@@ -58,23 +81,25 @@ public class UpdateCheckTests
     static string Release(string tag, bool prerelease = false, string owner = "ZanderH-code/volumebridge") => $$"""
         {"tag_name":"{{tag}}","draft":false,"prerelease":{{(prerelease ? "true" : "false")}},"html_url":"https://github.com/x",
          "assets":[
-          {"name":"VolumeBridgeSetup.exe","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridgeSetup.exe"},
-          {"name":"VolumeBridgeSetup.exe.sha256","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridgeSetup.exe.sha256"}]}
+          {"name":"VolumeBridge.exe","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridge.exe"},
+          {"name":"VolumeBridge.exe.sha256","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridge.exe.sha256"}]}
         """;
 
     [Fact]
     public void Parse_ReadsVersionAndAssets()
     {
-        var r = UpdateCheck.Parse(Release("v0.3.1"))!;
-        Assert.Equal(new Version(0, 3, 1), r.Version);
-        Assert.EndsWith("/v0.3.1/VolumeBridgeSetup.exe", r.SetupUrl);
+        var r = UpdateCheck.Parse(Release("v0.5.0"))!;
+        Assert.Equal(new Version(0, 5, 0), r.Version);
+        Assert.EndsWith("/v0.5.0/VolumeBridge.exe", r.ExeUrl);
+        Assert.EndsWith("/v0.5.0/VolumeBridge.exe.sha256", r.ChecksumUrl);
+        Assert.Equal("https://github.com/x", r.PageUrl);
     }
 
     [Fact]
     public void Parse_RejectsPrereleaseAndForeignDownloadHosts()
     {
-        Assert.Null(UpdateCheck.Parse(Release("v0.3.1", prerelease: true)));
-        Assert.Null(UpdateCheck.Parse(Release("v0.3.1", owner: "someone/else")));
+        Assert.Null(UpdateCheck.Parse(Release("v0.5.0", prerelease: true)));
+        Assert.Null(UpdateCheck.Parse(Release("v0.5.0", owner: "someone/else")));
     }
 
     [Theory]
@@ -93,7 +118,7 @@ public class UpdateCheckTests
     public void Checksum_FirstTokenOfSha256sumLine()
     {
         string h = new('a', 64);
-        Assert.Equal(h, UpdateCheck.ParseChecksum($"{h.ToUpperInvariant()}  VolumeBridgeSetup.exe\n"));
+        Assert.Equal(h, UpdateCheck.ParseChecksum($"{h.ToUpperInvariant()}  VolumeBridge.exe\n"));
         Assert.Null(UpdateCheck.ParseChecksum("not a hash"));
     }
 }
@@ -119,11 +144,12 @@ public class LocTests
     static readonly System.Globalization.CultureInfo Zh = new("zh-CN"), En = new("en-US"), De = new("de-DE");
 
     [Fact]
-    public void ConfigWins_ThenInstallerChoice_ThenWindowsLanguage()
+    public void ConfigWins_ThenWindowsLanguage()
     {
-        Assert.Equal(UiLanguage.English, Loc.Resolve("en", "zh", Zh));
-        Assert.Equal(UiLanguage.Chinese, Loc.Resolve("auto", "zh", En));
-        Assert.Equal(UiLanguage.Chinese, Loc.Resolve(null, null, Zh));
-        Assert.Equal(UiLanguage.English, Loc.Resolve("auto", "", De));
+        Assert.Equal(UiLanguage.English, Loc.Resolve("en", Zh));
+        Assert.Equal(UiLanguage.Chinese, Loc.Resolve("auto", Zh));
+        Assert.Equal(UiLanguage.English, Loc.Resolve("auto", En));
+        Assert.Equal(UiLanguage.Chinese, Loc.Resolve(null, Zh));
+        Assert.Equal(UiLanguage.English, Loc.Resolve("auto", De));
     }
 }

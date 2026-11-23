@@ -23,31 +23,33 @@ VolumeBridge attenuates the audio inside the Windows audio engine before it reac
 
 ## Install and use
 
-**Requirements:** Windows 10 (1903+) or Windows 11, 64-bit (x64). Administrator rights are needed to install; the app itself runs without elevation.
+**Requirements:** Windows 10 (1903+) or Windows 11, 64-bit (x64). Portable single executable — no installer needed. One administrator (UAC) prompt is needed to enable or remove the plugin; the app itself runs without elevation.
+
+> **Upgrading from 0.4.0 or earlier:** Uninstall the old installed version in **Settings → Apps** first, then run the new `VolumeBridge.exe`.
 
 1. **Switch your speaker to USB audio mode** and connect it to your PC. On the JBL Flip 6, hold **Bluetooth + Play for about 10 seconds** (check your model's instructions if using another speaker). **Quit Voicemeeter** if it is running so it does not hold the speaker exclusively.
-2. **Download and run `VolumeBridgeSetup.exe`** from the [latest release](https://github.com/ZanderH-code/volumebridge/releases/latest). Keep **"Enable the zero-latency volume plugin"** ticked. Windows audio will pause for about 2 seconds during setup.
-3. **Open VolumeBridge** and click **Set as default output**.
-4. **Check the status and enable startup:** play audio and confirm the window shows **● Working (zero latency)**, then tick **Start at logon**.
+2. **Download and run `VolumeBridge.exe`** from the [latest release](https://github.com/ZanderH-code/volumebridge/releases/latest) (place it anywhere you like). Because the executable is unsigned, Windows SmartScreen may show a warning — click **More info → Run anyway**.
+3. **Click Enable plugin** (one UAC prompt). Windows audio will pause for about 2 seconds while the plugin is registered.
+4. **Click Set as default output**, play audio to confirm the window shows **● Working (zero latency)**, then tick **Start at logon**.
 
 ### Everyday controls
 
 - **Max volume cap:** Defaults to **-12 dB** so 100% on the Windows slider is not deafening. Adjustable in the window from **0 to -30 dB**.
 - **Output device picker:** Automatically picks a playback device whose name contains `JBL` or `Zgmicro`, or you can select another device manually.
 - **Window and tray:** Closing the window minimizes VolumeBridge to the system tray so it stays out of the way.
-- **Language:** Choose English or 简体中文 in the installer, and switch anytime in the app.
-- **Updates:** One-click update check from GitHub Releases (downloads are SHA-256 verified).
-- **Clean uninstall:** Uninstalling from Settings → Apps restores all original Windows audio settings.
+- **Language:** Follows your Windows display language by default, and switches between English and 简体中文 anytime in the app.
+- **Updates:** One-click update check from GitHub Releases (downloads are SHA-256 verified and update the exe in place).
+- **Clean uninstall:** Click **Remove plugin** in the window (restores all original Windows audio settings and removes the logon task), then quit and delete `VolumeBridge.exe`.
 
 ## Trade-offs and troubleshooting
 
-Zero-latency mode modifies one Windows audio setting so the plugin can load. Know these trade-offs before installing:
+Zero-latency mode modifies one Windows audio setting so the plugin can load. Know these trade-offs before enabling it:
 
 - **Protected audio path is turned off (`DisableProtectedAudioDG=1`):** The plugin is not signed by Microsoft, so Windows needs this setting to load it (Equalizer APO does the same). A few DRM players (such as certain protected 4K audio streams) may be affected.
 - **Keep Audio enhancements on:** In **Settings → System → Sound → [your speaker]**, **Audio enhancements** must stay set to **Device Default Effects**. Turning it off makes Windows skip the plugin.
 - **Exclusive mode bypasses the plugin:** Apps that take exclusive WASAPI control bypass the Windows audio engine and will not be attenuated.
 - **USB port changes or Windows feature updates:** Moving the speaker to a different USB port or installing a major Windows update can drop the plugin setting. The VolumeBridge window will tell you, and clicking **Enable plugin** restores it.
-- **If sound stops working after installing:** Uninstall VolumeBridge in **Settings → Apps** (which restores everything), or set the speaker's **Audio enhancements** to **Off**.
+- **If sound stops working after enabling:** Click **Remove plugin** in VolumeBridge (which restores everything), or set the speaker's **Audio enhancements** to **Off**.
 
 ## Supported devices
 
@@ -94,16 +96,20 @@ Settings in `%LOCALAPPDATA%\VolumeBridge\config.json`:
 | `maxOutputDb` | `-12` | Output level at 100% slider (dB); `0` = speaker's full level |
 | `outputKeywords` | `["JBL", "Zgmicro"]` | Case-insensitive name keywords for automatic device selection |
 | `outputDeviceId` | `null` | Fixed output endpoint ID (set by the device picker) |
-| `language` | `"auto"` | `"en"`, `"zh"`, or `"auto"` (follows installer choice) |
+| `language` | `"auto"` | `"en"`, `"zh"`, or `"auto"` (follows Windows display language) |
 
 ## Building from source
 
 ```powershell
+# 1. Build the C++ APO DLL (from a Visual Studio x64 Developer Prompt)
+./apo/build.ps1 -Out "$PWD\out"
+
+# 2. Run tests and build the portable single exe (.NET Framework 4.8)
 dotnet test tests/VolumeBridge.Tests
-dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
+dotnet build src/VolumeBridge -c Release "-p:ApoDll=$PWD\out\VolumeBridgeApo.dll" -p:RequireApo=true -o dist
 ```
 
-The GitHub Actions workflow (`.github/workflows/build.yml`) builds the C++ APO (`apo/`) and the Inno Setup installer on Windows, and publishes a GitHub Release on every `v*` tag. Design notes and history are in [docs/PLAN.md](docs/PLAN.md) (Chinese).
+The GitHub Actions workflow (`.github/workflows/build.yml`) builds the C++ APO (`apo/`) and embeds it into the single portable `VolumeBridge.exe` on Windows, and publishes a GitHub Release on every `v*` tag. Design notes and history are in [docs/PLAN.md](docs/PLAN.md) (Chinese).
 
 ## Credits and licenses
 

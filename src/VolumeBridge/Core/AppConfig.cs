@@ -1,5 +1,5 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Globalization;
+using System.Text;
 
 namespace VolumeBridge.Core;
 
@@ -17,19 +17,10 @@ public sealed class AppConfig
     public double MaxOutputDb { get; set; } = -12;
 
     /// <summary>Linear factor for <see cref="MaxOutputDb"/>, limited to -60..0 dB.</summary>
-    [JsonIgnore]
-    public float OutputCapGain => (float)Math.Pow(10, Math.Clamp(MaxOutputDb, -60, 0) / 20.0);
+    public float OutputCapGain => (float)Math.Pow(10, Math.Max(-60, Math.Min(0, MaxOutputDb)) / 20.0);
 
-    /// <summary>UI language: "auto" (installer choice, else Windows), "zh" or "en".</summary>
+    /// <summary>UI language: "auto" (Windows display language), "zh" or "en".</summary>
     public string Language { get; set; } = "auto";
-
-    static readonly JsonSerializerOptions Json = new()
-    {
-        WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        AllowTrailingCommas = true,
-    };
 
     /// <summary>Loads config from <paramref name="path"/>, writing defaults first if the file is missing.
     /// Settings of older versions that no longer exist are ignored.</summary>
@@ -44,8 +35,46 @@ public sealed class AppConfig
         return FromJson(File.ReadAllText(path));
     }
 
-    public static AppConfig FromJson(string json) =>
-        JsonSerializer.Deserialize<AppConfig>(json, Json) ?? new AppConfig();
+    public static AppConfig FromJson(string json)
+    {
+        var cfg = new AppConfig();
+        if (MiniJson.Parse(json) is not Dictionary<string, object?> obj) return cfg;
 
-    public string ToJson() => JsonSerializer.Serialize(this, Json);
+        if (obj.TryGetValue("outputKeywords", out var kwVal) && kwVal is List<object?> kwList)
+            cfg.OutputKeywords = kwList.OfType<string>().ToList();
+
+        if (obj.TryGetValue("outputDeviceId", out var idVal))
+            cfg.OutputDeviceId = idVal as string;
+
+        if (obj.TryGetValue("maxOutputDb", out var dbVal) && dbVal is double db)
+            cfg.MaxOutputDb = db;
+
+        if (obj.TryGetValue("language", out var langVal) && langVal is string lang)
+            cfg.Language = lang;
+
+        return cfg;
+    }
+
+    public string ToJson()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("{");
+        sb.Append("  \"outputKeywords\": [");
+        for (int i = 0; i < OutputKeywords.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append(MiniJson.Quote(OutputKeywords[i]));
+        }
+        sb.AppendLine("],");
+        sb.Append("  \"outputDeviceId\": ");
+        sb.Append(OutputDeviceId is null ? "null" : MiniJson.Quote(OutputDeviceId));
+        sb.AppendLine(",");
+        sb.Append("  \"maxOutputDb\": ");
+        sb.Append(MaxOutputDb.ToString("G", CultureInfo.InvariantCulture));
+        sb.AppendLine(",");
+        sb.Append("  \"language\": ");
+        sb.AppendLine(MiniJson.Quote(Language));
+        sb.Append("}");
+        return sb.ToString();
+    }
 }

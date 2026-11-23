@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Net.Http;
 using System.Reflection;
 using Microsoft.Win32;
 using VolumeBridge.Audio;
@@ -14,8 +15,6 @@ namespace VolumeBridge.Ui;
 /// </summary>
 sealed class TrayApp : ApplicationContext
 {
-    /// <summary>Created by the elevated installer process once UAC is accepted (see installer InitializeSetup).</summary>
-    const string UpdatingMutex = @"Global\VolumeBridge.Updating";
     static readonly TimeSpan LogEvery = TimeSpan.FromSeconds(60);
 
     readonly FileLog _log;
@@ -65,9 +64,9 @@ sealed class TrayApp : ApplicationContext
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
 
-        // Attach runs usbip.exe and may take a few seconds: keep it off the UI thread.
         Apo.Start();
-        CleanUpOldInstallers();
+        Task.Run(() => Autostart.SyncPathIfInstalled(Application.ExecutablePath, _log.Write));
+        CleanUpOldUpdateFiles();
 
         if (!startHidden) ShowWindow();
         if (notice is not null) _tray.ShowBalloonTip(5000, "VolumeBridge", notice, ToolTipIcon.Info);
@@ -81,29 +80,42 @@ sealed class TrayApp : ApplicationContext
     bool _updating;
 
     /// <summary>
-    /// Installers downloaded by earlier one-click updates are no longer needed. Runs in the background
-    /// with retries: right after an update, the installer that relaunched us may still be running from there.
+    /// Cleans up <c>&lt;exe&gt;.old</c> and temporary downloads from earlier one-click updates. Runs in
+    /// the background with retries because the previous process may still be exiting right after --updated.
     /// </summary>
-    void CleanUpOldInstallers()
+    void CleanUpOldUpdateFiles()
     {
         var ct = _quit.Token;
+        string oldExe = Application.ExecutablePath + ".old";
         Task.Run(async () =>
         {
             for (int attempt = 0; attempt < 6 && !ct.IsCancellationRequested; attempt++)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
-                if (_updating || !Directory.Exists(UpdateDir)) return; // a new download owns the folder
+                try { await Task.Delay(TimeSpan.FromSeconds(attempt == 0 ? 3 : 10), ct); }
+                catch (OperationCanceledException) { return; }
+                if (_updating) return; // a new update owns the files
+
                 bool left = false;
-                foreach (var f in Directory.EnumerateFiles(UpdateDir))
+                if (File.Exists(oldExe))
                 {
-                    try { File.Delete(f); }
+                    try { File.Delete(oldExe); }
                     catch (Exception e) when (e is IOException or UnauthorizedAccessException) { left = true; }
                 }
-                if (!left)
+                if (Directory.Exists(UpdateDir))
                 {
-                    try { Directory.Delete(UpdateDir); } catch (Exception) { }
-                    return;
+                    bool dirLeft = false;
+                    foreach (var f in Directory.EnumerateFiles(UpdateDir))
+                    {
+                        try { File.Delete(f); }
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { dirLeft = true; }
+                    }
+                    if (!dirLeft)
+                    {
+                        try { Directory.Delete(UpdateDir); } catch (Exception) { }
+                    }
+                    else left = true;
                 }
+                if (!left) return;
             }
         }, ct);
     }
@@ -142,7 +154,7 @@ sealed class TrayApp : ApplicationContext
         bool ok = a.State is ApoState.Working or ApoState.Idle;
         string tip = ok ? "VolumeBridge: " + a.VolumeText : "VolumeBridge: " + T("需要处理", "needs attention");
         _tray.Icon = ok ? _iconOk : _iconIdle;
-        _tray.Text = tip.Length > 63 ? tip[..63] : tip;
+        _tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
         if (_form.Visible) _form.ShowApo(a);
         if (DateTime.UtcNow - _lastLog >= LogEvery)
         {
@@ -163,18 +175,23 @@ sealed class TrayApp : ApplicationContext
     public void ReopenOutput() => Apo.Recheck();
 
     /// <summary>Runs the elevated plugin setup for <paramref name="endpointId"/> (one UAC prompt).</summary>
-    public async Task<bool> EnableApoAsync(string endpointId)
+    public Task<bool> EnableApoAsync(string endpointId) => RunElevatedApoAsync($"--apo-setup \"{endpointId}\"");
+
+    /// <summary>Runs the elevated plugin removal (one UAC prompt).</summary>
+    public Task<bool> RemoveApoAsync() => RunElevatedApoAsync("--apo-remove");
+
+    async Task<bool> RunElevatedApoAsync(string arguments)
     {
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, $"--apo-setup \"{endpointId}\"")
+            using var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, arguments)
             {
                 UseShellExecute = true,
                 Verb = "runas",
                 WindowStyle = ProcessWindowStyle.Hidden,
             })!;
-            await p.WaitForExitAsync();
-            _log.Write($"apo-setup exited with {p.ExitCode}");
+            await Task.Run(() => p.WaitForExit());
+            _log.Write($"{arguments} exited with {p.ExitCode}");
             Apo.Recheck();
             return p.ExitCode == 0;
         }
@@ -235,8 +252,8 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// GitHub latest release → download + SHA-256 check → run the installer → quit once the installer
-    /// is elevated (it then waits for us to exit, installs, and relaunches VolumeBridge).
+    /// GitHub latest release → download + SHA-256 check → rename running exe to .old → place new exe →
+    /// launch with --updated → quit. Rolls back on failure; opens the release page if the folder is not writable.
     /// </summary>
     public async Task CheckForUpdatesAsync(IWin32Window owner, Button button)
     {
@@ -258,10 +275,19 @@ sealed class TrayApp : ApplicationContext
                 return;
             }
             if (MessageBox.Show(owner,
-                    T($"发现新版本 {latest.Tag}（当前 {CurrentVersion.ToString(3)}）。\n\n现在下载并安装吗？安装时需要管理员确认，完成后会自动重新打开。",
-                      $"Version {latest.Tag} is available (you have {CurrentVersion.ToString(3)}).\n\nDownload and install it now? Installing needs administrator approval; VolumeBridge reopens afterwards."),
+                    T($"发现新版本 {latest.Tag}（当前 {CurrentVersion.ToString(3)}）。\n\n现在下载并更新吗？完成后会自动重新打开。",
+                      $"Version {latest.Tag} is available (you have {CurrentVersion.ToString(3)}).\n\nDownload and update now? VolumeBridge will reopen automatically."),
                     "VolumeBridge", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return;
+
+            string currentExe = Application.ExecutablePath;
+            string exeDir = Path.GetDirectoryName(currentExe)!;
+            if (!IsDirectoryWritable(exeDir))
+            {
+                _log.Write($"exe directory is not writable ({exeDir}); opening release page");
+                OpenUrl(latest.PageUrl);
+                return;
+            }
 
             string shown = "";
             var progress = new Progress<double>(p =>
@@ -271,30 +297,47 @@ sealed class TrayApp : ApplicationContext
                 shown = text;
                 button.Text = text;
             });
-            string setup = await UpdateCheck.DownloadVerifiedAsync(http, latest,
+            string downloaded = await UpdateCheck.DownloadVerifiedAsync(http, latest,
                 UpdateDir, progress, ct);
             if (Gone()) return;
-            _log.Write($"update {latest.Tag} downloaded and verified: {setup}");
+            _log.Write($"update {latest.Tag} downloaded and verified: {downloaded}");
 
-            // Inno's loader runs unelevated and starts an elevated child itself, so Process.Start returns
-            // before UAC is answered. Quit only once the elevated installer signals it is running; if the
-            // loader exits first, UAC was declined.
-            button.Text = T("等待管理员确认…", "Waiting for administrator approval…");
-            using var installer = Process.Start(new ProcessStartInfo(setup, "/SILENT /SUPPRESSMSGBOXES /NORESTART") { UseShellExecute = true })!;
-            while (!ct.IsCancellationRequested)
+            string oldExe = currentExe + ".old";
+            bool renamed = false;
+            try
             {
-                if (InstallerElevated())
+                if (File.Exists(oldExe)) File.Delete(oldExe);
+                File.Move(currentExe, oldExe);
+                renamed = true;
+                // Copy instead of Move so updates work even if %TEMP% and the exe are on different drives.
+                File.Copy(downloaded, currentExe, overwrite: true);
+                try { File.Delete(downloaded); } catch (Exception) { }
+                Process.Start(new ProcessStartInfo(currentExe, "--updated") { UseShellExecute = false });
+                _log.Write($"updated to {latest.Tag}; quitting old instance");
+                Quit();
+                return;
+            }
+            catch (Exception ex)
+            {
+                _log.Write($"self-update swap failed: {ex}");
+                if (renamed)
                 {
-                    _log.Write("installer is running elevated; quitting for the update");
-                    Quit();
-                    return;
+                    try
+                    {
+                        if (File.Exists(currentExe)) File.Delete(currentExe);
+                        if (File.Exists(oldExe)) File.Move(oldExe, currentExe);
+                    }
+                    catch (Exception rb) { _log.Write($"rollback failed: {rb}"); }
                 }
-                if (installer.HasExited)
+                if (!Gone())
                 {
-                    MessageBox.Show(owner, T("已取消更新。", "Update cancelled."), "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
+                    var res = MessageBox.Show(owner,
+                        T($"更新失败：{ex.Message}\n\n是否打开发布页手动下载？",
+                          $"Update failed: {ex.Message}\n\nOpen the release page to download manually?"),
+                        "VolumeBridge", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (res == DialogResult.Yes) OpenUrl(latest.PageUrl);
                 }
-                await Task.Delay(100, ct);
+                return;
             }
         }
         catch (OperationCanceledException) when (Quitting) { }
@@ -307,6 +350,7 @@ sealed class TrayApp : ApplicationContext
         }
         finally
         {
+            _updating = false;
             if (!Gone())
             {
                 button.Text = T("检查更新", "Check for updates"); // current language, even if switched meanwhile
@@ -315,14 +359,21 @@ sealed class TrayApp : ApplicationContext
         }
     }
 
-    static bool InstallerElevated()
+    static bool IsDirectoryWritable(string dir)
     {
+        string probe = Path.Combine(dir, $".vb-write-test-{Guid.NewGuid():N}");
         try
         {
-            if (!Mutex.TryOpenExisting(UpdatingMutex, out var m)) return false;
-            m.Dispose();
+            using (File.Create(probe)) { }
+            File.Delete(probe);
             return true;
         }
-        catch (UnauthorizedAccessException) { return true; } // exists, owned by the elevated installer
+        catch (Exception) { return false; }
+    }
+
+    static void OpenUrl(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return;
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch (Exception) { }
     }
 }

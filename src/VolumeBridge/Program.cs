@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using VolumeBridge.Audio;
@@ -7,7 +10,7 @@ using VolumeBridge.Ui;
 
 namespace VolumeBridge;
 
-static partial class Program
+static class Program
 {
     const string Usage = """
         VolumeBridge - make the Windows volume slider and mute control a fixed-volume USB speaker.
@@ -28,6 +31,34 @@ static partial class Program
 
     [STAThread]
     static int Main(string[] args)
+    {
+        AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+        return Run(args);
+    }
+
+    // AssemblyResolve can fire more than once for the same name (e.g. from VolumeBridge and from NAudio.Wasapi);
+    // loading the bytes twice would create two copies of every NAudio type, so each assembly is loaded once.
+    static readonly Dictionary<string, Assembly> EmbeddedAssemblies = new(StringComparer.OrdinalIgnoreCase);
+
+    static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)
+    {
+        string? simple = new AssemblyName(args.Name).Name;
+        if (string.IsNullOrEmpty(simple)) return null;
+        lock (EmbeddedAssemblies)
+        {
+            if (EmbeddedAssemblies.TryGetValue(simple!, out var loaded)) return loaded;
+            using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(simple + ".dll");
+            if (s is null) return null;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            var asm = Assembly.Load(ms.ToArray());
+            EmbeddedAssemblies[simple!] = asm;
+            return asm;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Run(string[] args)
     {
         string mode = args.Length == 0 ? "--gui" : args[0];
         bool gui = mode is "--gui" or "--tray" or "--updated";
@@ -55,7 +86,7 @@ static partial class Program
                 Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
                 return 0;
             case "--install-autostart":
-                return Try(() => Autostart.Install(Environment.ProcessPath!), "autostart installed");
+                return Try(() => Autostart.Install(Application.ExecutablePath), "autostart installed");
             case "--uninstall-autostart":
                 return Try(Autostart.Uninstall, "autostart removed");
             case "--apo-setup" or "--apo-remove":
@@ -67,13 +98,14 @@ static partial class Program
                 return 2;
         }
 
-        // One instance per machine. The installer waits on the same mutex.
+        // One instance per machine. After a self-update (--updated), the old process is still exiting.
         Mutex? single = null;
         bool first;
         try
         {
             single = new Mutex(false, MutexName);
-            try { first = single.WaitOne(0); }
+            int waitMs = mode == "--updated" ? 15_000 : 0;
+            try { first = single.WaitOne(waitMs); }
             catch (AbandonedMutexException) { first = true; }
         }
         catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
@@ -101,7 +133,7 @@ static partial class Program
             MessageBox.Show($"Cannot read {configPath}: {e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;
         }
-        Loc.Current = Loc.Resolve(config.Language, ReadInstallerLanguage(), System.Globalization.CultureInfo.CurrentUICulture);
+        Loc.Current = Loc.Resolve(config.Language, CultureInfo.CurrentUICulture);
 
         int exitCode = RunGui(mode, config, dataDir, configPath);
         try { single?.ReleaseMutex(); } catch (ApplicationException) { /* not owned */ }
@@ -111,7 +143,6 @@ static partial class Program
 
     static int RunGui(string mode, AppConfig config, string dataDir, string configPath)
     {
-        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -141,9 +172,15 @@ static partial class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => log.Write($"{mode} crashed: {e.ExceptionObject}");
         try
         {
+            if (ApoRegistration.IsLegacyInstallerPresent())
+            {
+                // The old installed version owns %ProgramFiles%\VolumeBridge; its own uninstaller restores everything.
+                log.Write($"refusing {mode}: an older installed version of VolumeBridge (Inno Setup) is still present. Uninstall it in Settings -> Apps first.");
+                return 2;
+            }
             if (mode == "--apo-remove")
             {
-                ApoRegistration.RemoveAll(log.Write);
+                ApoRegistration.FullRemove(log.Write);
                 return 0;
             }
             string configPath = Path.Combine(dataDir, AppConfig.FileName);
@@ -155,7 +192,9 @@ static partial class Program
                 log.Write("no matching speaker connected; nothing changed (enable it later from the VolumeBridge window)");
                 return 0;
             }
+            string dllPath = ApoRegistration.DeployAndRegisterDll(log.Write);
             ApoRegistration.Install(ids, log.Write);
+            ApoRegistration.CleanupOldDlls(keepPath: dllPath, removeDirIfEmpty: false, log.Write);
             return 0;
         }
         catch (Exception e)
@@ -178,17 +217,6 @@ static partial class Program
         finally { foreach (var d in list) d.Dispose(); }
     }
 
-    /// <summary>Language picked in the installer (written next to the exe), if any.</summary>
-    static string? ReadInstallerLanguage()
-    {
-        try
-        {
-            string f = Path.Combine(AppContext.BaseDirectory, Loc.InstallerChoiceFile);
-            return File.Exists(f) ? File.ReadAllText(f).Trim() : null;
-        }
-        catch (Exception) { return null; }
-    }
-
     static int Try(Action action, string done)
     {
         try
@@ -204,11 +232,11 @@ static partial class Program
         }
     }
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AttachConsole(int processId);
+    private static extern bool AttachConsole(int processId);
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AllocConsole();
+    private static extern bool AllocConsole();
 }

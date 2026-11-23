@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 namespace VolumeBridge.Ui;
 
 /// <summary>Speaker glyph drawn at runtime (no binary assets in the repo).</summary>
-static partial class AppIcon
+static class AppIcon
 {
     /// <summary>Returns an Icon that owns its handle (safe to Dispose).</summary>
     public static Icon Create(int size, bool ok)
@@ -35,7 +35,7 @@ static partial class AppIcon
         finally { DestroyIcon(h); }
     }
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DestroyIcon(IntPtr handle);
+    private static extern bool DestroyIcon(IntPtr handle);
 }

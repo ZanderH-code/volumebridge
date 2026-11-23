@@ -8,7 +8,7 @@ public sealed record OutputMatch(DeviceInfo? Device, string? Error);
 public static class DeviceMatcher
 {
     static bool Has(DeviceInfo d, string keyword) =>
-        keyword.Length > 0 && d.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase);
+        keyword.Length > 0 && d.Name.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
 
     /// <summary>The speaker: the exact <paramref name="deviceId"/> if set, else the single keyword match.</summary>
     public static OutputMatch FindOutput(IReadOnlyList<string> keywords, string? deviceId, IReadOnlyList<DeviceInfo> renders)
