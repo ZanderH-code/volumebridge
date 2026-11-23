@@ -32,25 +32,22 @@ SolidCompression=yes
 WizardStyle=modern
 ; Ask the user to close a running VolumeBridge (it detaches the virtual speaker cleanly on exit).
 AppMutex=VolumeBridge.Running,Global\VolumeBridge.Running
-CloseApplications=no
 UninstallDisplayName=VolumeBridge
 
 [Messages]
 WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs usbip-win2 {#UsbipVersion} (signed virtual USB host driver) if needed.%n%n安装驱动时，所有 USB 3.0 Hub 会重启，USB 设备（包括音箱、键盘、鼠标）会短暂断开几秒，属于正常现象。
 
-[Dirs]
-; config.json and volumebridge.log are written next to the exe by a normal (non-admin) user.
-Name: "{app}"; Permissions: users-modify
-
 [Files]
 Source: "{#PayloadDir}\VolumeBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded
+; Installed right after extraction (AfterInstall) so NeedRestart, evaluated at the end of the copy phase, sees it.
+Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded; AfterInstall: InstallUsbip
 
 [Icons]
 Name: "{group}\VolumeBridge 测试（虚拟音箱）"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"
 Name: "{group}\VolumeBridge 设备诊断"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--probe"; WorkingDir: "{app}"
-Name: "{group}\打开日志文件夹"; Filename: "{app}"
+; Config and logs live in %LOCALAPPDATA%\VolumeBridge of whoever runs it (Program Files stays read-only).
+Name: "{group}\打开日志文件夹"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--open-logs"
 Name: "{group}\卸载 VolumeBridge"; Filename: "{uninstallexe}"
 
 [Run]
@@ -103,19 +100,13 @@ begin
     UsbipFailed('退出码 ' + IntToStr(ResultCode) + '。若为 1，可能是该驱动要求开启测试签名。');
     Exit;
   end;
-  if InstalledUsbipVersion() = '' then
+  if UsbipNeeded() then
   begin
-    UsbipFailed('安装程序已结束，但未检测到安装结果。');
+    UsbipFailed('安装程序已结束，但检测到的版本仍不是 {#UsbipVersion}（当前：' + InstalledUsbipVersion() + '）。');
     Exit;
   end;
   UsbipInstalledNow := True;
   RegWriteDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', 1);
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if (CurStep = ssPostInstall) and UsbipNeeded() then
-    InstallUsbip();
 end;
 
 { usbip-win2 asks for a reboot (AlwaysRestart=yes); offer it, but the user may test first. }
@@ -124,21 +115,68 @@ begin
   Result := UsbipInstalledNow;
 end;
 
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  UsbipRemovedNow: Boolean;
+
+{ "C:\...\unins000.exe" /LOG  ->  C:\...\unins000.exe }
+function ExecutableFromCommandLine(const Cmd: String): String;
+var
+  S: String;
+  P: Integer;
+begin
+  S := Trim(Cmd);
+  if (Length(S) > 0) and (S[1] = '"') then
+  begin
+    Delete(S, 1, 1);
+    P := Pos('"', S);
+    if P > 0 then
+      S := Copy(S, 1, P - 1);
+    Result := S;
+  end
+  else
+  begin
+    P := Pos(' /', S);
+    if P > 0 then
+      Result := Copy(S, 1, P - 1)
+    else
+      Result := S;
+  end;
+end;
+
+{ Runs during usUninstall so UninstallNeedRestart (evaluated afterwards) can offer the reboot. }
+procedure MaybeRemoveUsbip();
 var
   Marker: Cardinal;
-  Uninstaller: String;
+  Uninstaller, Exe: String;
   ResultCode: Integer;
 begin
-  if CurUninstallStep <> usPostUninstall then
-    Exit;
   if not RegQueryDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', Marker) or (Marker <> 1) then
     Exit;
+  if RegQueryStringValue(HKLM64, '{#UsbipUninstallKey}', 'UninstallString', Uninstaller) then
+  begin
+    Exe := ExecutableFromCommandLine(Uninstaller);
+    if SuppressibleMsgBox('VolumeBridge 安装时一并安装了 usbip-win2 驱动。' + #13#10 +
+        '是否也卸载它？（如果其他软件也在使用 usbip-win2，请选“否”。卸载后需要重启。）',
+        mbConfirmation, MB_YESNO, IDNO) = IDYES then
+    begin
+      if Exec(Exe, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', ExtractFileDir(Exe), SW_HIDE, ewWaitUntilTerminated, ResultCode)
+         and (ResultCode = 0) then
+        UsbipRemovedNow := True
+      else
+        SuppressibleMsgBox('usbip-win2 卸载失败（' + IntToStr(ResultCode) + '）。可在“设置 → 应用”中手动卸载 USBip。',
+          mbError, MB_OK, IDOK);
+    end;
+  end;
   RegDeleteKeyIncludingSubkeys(HKLM64, '{#MarkerKey}');
-  if not RegQueryStringValue(HKLM64, '{#UsbipUninstallKey}', 'UninstallString', Uninstaller) then
-    Exit;
-  if SuppressibleMsgBox('VolumeBridge 安装时一并安装了 usbip-win2 驱动。' + #13#10 +
-      '是否也卸载它？（如果其他软件也在使用 usbip-win2，请选“否”。卸载后需要重启。）',
-      mbConfirmation, MB_YESNO, IDNO) = IDYES then
-    Exec(RemoveQuotes(Uninstaller), '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    MaybeRemoveUsbip();
+end;
+
+function UninstallNeedRestart(): Boolean;
+begin
+  Result := UsbipRemovedNow;
 end;

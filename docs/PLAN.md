@@ -114,7 +114,7 @@ VolumeBridge.exe：USB/IP 服务端 + UAC1 设备模拟
 - 输出端只用 NAudio 的底层 CoreAudioApi，不使用 `WasapiOut`。线程注册 MMCSS，热路径不做内存分配，事件等待设有限超时。
 - Flip 6 可能显示为 "Zgmicro AUDIO"。输出设备按关键字或设备 ID 匹配，匹配到多个时拒绝启动；**输出设备是 VolumeBridge Speaker 自身时拒绝启动**（防止声音自我循环）。
 - 每次打开设备都重新查询 `GetMixFormat()`。渲染会话退出 Windows 通话自动闪避（ducking）。处理 `DEVICE_INVALIDATED`、`DEVICE_IN_USE` 和唤醒事件。
-- config 和日志路径基于 `AppContext.BaseDirectory`。WinExe + AttachConsole。托盘用 `Shell_NotifyIconW`。
+- config 和日志：便携运行时放在 exe 同目录；安装在 Program Files 时放在 `%LOCALAPPDATA%\VolumeBridge`（Program Files 保持只读，避免普通用户替换 exe 造成提权；Neon 安装包评审 N5）。WinExe + AttachConsole。托盘用 `Shell_NotifyIconW`。
 
 v2 中针对外部虚拟声卡的结论（VB-CABLE 兜底、gainMode 自动判断、录制端 RMS）不再适用。`--probe` 保留为诊断工具。
 

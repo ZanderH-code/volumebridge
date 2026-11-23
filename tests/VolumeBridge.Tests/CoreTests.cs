@@ -85,3 +85,17 @@ public class AppConfigTests
         Assert.Equal(2, AppConfig.FromJson(c.ToJson()).VirtualCandidates.Count);
     }
 }
+
+public class AppPathsTests
+{
+    [Fact]
+    public void ProgramFilesInstall_UsesLocalAppData_PortableUsesExeDir()
+    {
+        string pf = Path.Combine(Path.GetTempPath(), "pf");
+        string lad = Path.Combine(Path.GetTempPath(), "lad");
+        Assert.Equal(Path.Combine(lad, "VolumeBridge"), AppPaths.DataDir(Path.Combine(pf, "VolumeBridge") + Path.DirectorySeparatorChar, [null, pf], lad));
+
+        string portable = Path.Combine(Path.GetTempPath(), "pfx", "VolumeBridge");
+        Assert.Equal(portable, AppPaths.DataDir(portable, [pf], lad)); // "pfx" is not under "pf"
+    }
+}
