@@ -111,16 +111,16 @@ public sealed class AudioBridge
             _priming = true;
             Interlocked.Increment(ref _underruns);
         }
-        double periodMs = frames * 1000.0 / fmt.SampleRate;
-        // Leave priming only when, after this read, the target is still buffered.
-        if (_priming && fill >= _targetMs + periodMs)
+        // Pre-read level that leaves the target buffered after this read (the drift loop's operating point).
+        double keepMs = _targetMs + frames * 1000.0 / fmt.SampleRate;
+        if (_priming && fill >= keepMs)
         {
             _priming = false;
             _resampler?.Reset();
         }
-        if (fill > _targetMs + OverrunMarginMs)
+        if (fill > keepMs + OverrunMarginMs)
         {
-            _ring.Discard((int)((fill - _targetMs) * InputRate / 1000));
+            _ring.Discard((int)((fill - keepMs) * InputRate / 1000));
             Interlocked.Increment(ref _overruns);
         }
 

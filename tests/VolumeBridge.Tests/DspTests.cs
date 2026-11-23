@@ -172,3 +172,19 @@ public class AudioBridgeUnderrunTests
         Assert.Equal(1, bridge.Underruns);
     }
 }
+
+public class AudioBridgeOverrunTests
+{
+    [Fact]
+    public void OverrunTrim_KeepsTargetPlusPeriod_SoTheNextReadIsComplete()
+    {
+        var bridge = new AudioBridge(targetMs: 20, smoothingMs: 1) { TargetGain = 1f };
+        bridge.Start(new OutputFormat(48000, 2, SampleFormat.Float32));
+        bridge.Write(new byte[48 * 100 * 4]);                // 100 ms queued (e.g. after a render stall)
+        var dst = new byte[1056 * 8];
+        bridge.Render(dst, 1056, 0.022);                     // 22 ms period (shared-mode buffer)
+        Assert.Equal(1, bridge.Overruns);
+        Assert.Equal(0, bridge.Underruns);
+        Assert.InRange(bridge.FillMs, 19.9, 20.1);
+    }
+}
