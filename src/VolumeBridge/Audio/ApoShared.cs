@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 namespace VolumeBridge.Audio;
 
@@ -32,7 +33,7 @@ public sealed class ApoShared : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         var fs = new FileStream(FilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
         if (fs.Length < Size) fs.SetLength(Size);
-        _map = MemoryMappedFile.CreateFromFile(fs, null, Size, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, leaveOpen: false);
+        _map = MemoryMappedFile.CreateFromFile(fs, null, Size, MemoryMappedFileAccess.ReadWrite, null, HandleInheritability.None, leaveOpen: false);
         _view = _map.CreateViewAccessor(0, Size);
         if (_view.ReadUInt32(OMagic) != Magic)
         {
@@ -46,7 +47,7 @@ public sealed class ApoShared : IDisposable
     /// <summary>Publishes the gain for the APO's fallback path (used when it gets no volume notifications).</summary>
     public void WriteGain(float gain)
     {
-        _view.Write(OAppGain, Math.Clamp(gain, 0f, 1f));
+        _view.Write(OAppGain, Clamp01(gain));
         _seq = _seq == uint.MaxValue ? 1 : _seq + 1;
         _view.Write(OAppSeq, _seq);
     }
@@ -54,14 +55,14 @@ public sealed class ApoShared : IDisposable
     /// <summary>Output ceiling (linear) the APO multiplies on top of the slider; persists in the file.</summary>
     public void WriteCap(float capGain)
     {
-        _view.Write(OCapGain, Math.Clamp(capGain, 0f, 1f));
+        _view.Write(OCapGain, Clamp01(capGain));
         _view.Write(OCapSet, 1u);
     }
 
     public ApoReport Read()
     {
         ulong beat = _view.ReadUInt64(OHeartbeat);
-        long age = beat == 0 ? long.MaxValue : Environment.TickCount64 - (long)beat;
+        long age = beat == 0 ? long.MaxValue : unchecked((long)(GetTickCount64() - beat));
         return new ApoReport(
             (int)_view.ReadUInt32(OInstances),
             (ApoSource)_view.ReadUInt32(OSource),
@@ -74,6 +75,11 @@ public sealed class ApoShared : IDisposable
             _view.ReadUInt32(OMuted) != 0,
             (int)_view.ReadUInt32(ONotifs));
     }
+
+    static float Clamp01(float v) => v < 0f ? 0f : v > 1f ? 1f : v;
+
+    [DllImport("kernel32.dll")]
+    static extern ulong GetTickCount64();
 
     public void Dispose()
     {

@@ -81,7 +81,7 @@ sealed class MainForm : Form
         _language.SelectedIndex = Current == UiLanguage.Chinese ? 0 : 1;
         _language.SelectedIndexChanged += (_, _) => _app.SetLanguage(_language.SelectedIndex == 0 ? UiLanguage.Chinese : UiLanguage.English);
 
-        _cap.Value = (decimal)Math.Clamp(Math.Round(_app.Config.MaxOutputDb), -30, 0);
+        _cap.Value = (decimal)Math.Max(-30, Math.Min(0, Math.Round(_app.Config.MaxOutputDb)));
         _cap.ValueChanged += (_, _) => _app.SetMaxOutputDb((double)_cap.Value);
         _enableApo.Click += async (_, _) => await EnableApo();
         _enableApo.Visible = false;
@@ -202,10 +202,10 @@ sealed class MainForm : Form
             _detail.Text += T("\n注意：该音箱不是默认输出，点击“设为默认输出”。", "\nNote: the speaker is not the default output; click \"Set as default output\".");
 
         var r = a.Report;
-        _stats.Text = r is null ? "" : string.Create(CultureInfo.InvariantCulture,
-            $"{T("增益", "Gain")} {(r.TargetGain <= 0.0001f ? "-∞" : (20 * Math.Log10(r.TargetGain)).ToString("0.0", CultureInfo.InvariantCulture))} dB   " +
-            $"{T("音量来源", "Volume source")}: {a.SourceText}\n" +
-            $"{T("插件实例", "Plugin instances")} {r.Instances}   {r.SampleRate} Hz  {r.Channels} ch   {T("附加延迟", "Added latency")} 0 ms");
+        _stats.Text = r is null ? "" :
+            FormattableString.Invariant($"{T("增益", "Gain")} {(r.TargetGain <= 0.0001f ? "-∞" : (20 * Math.Log10(r.TargetGain)).ToString("0.0", CultureInfo.InvariantCulture))} dB   ") +
+            FormattableString.Invariant($"{T("音量来源", "Volume source")}: {a.SourceText}\n") +
+            FormattableString.Invariant($"{T("插件实例", "Plugin instances")} {r.Instances}   {r.SampleRate} Hz  {r.Channels} ch   {T("附加延迟", "Added latency")} 0 ms");
     }
 
     void MakeDefault()
@@ -279,7 +279,7 @@ sealed class MainForm : Form
         if (_settingAutostart) return;
         try
         {
-            if (_autostart.Checked) Autostart.Install(Environment.ProcessPath!);
+            if (_autostart.Checked) Autostart.Install(Application.ExecutablePath);
             else Autostart.Uninstall();
         }
         catch (Exception e)

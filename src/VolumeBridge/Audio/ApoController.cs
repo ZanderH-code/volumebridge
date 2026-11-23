@@ -24,7 +24,7 @@ public sealed record ApoStatus(
     ApoReport? Report)
 {
     public string VolumeText => Muted ? T("静音", "Muted")
-        : string.Create(CultureInfo.InvariantCulture, $"{Math.Round(SliderScalar * 100)}%  ({(SliderScalar <= 0.001f ? "-∞" : (20 * Math.Log10(SliderScalar)).ToString("0.0", CultureInfo.InvariantCulture))} dB)");
+        : FormattableString.Invariant($"{Math.Round(SliderScalar * 100)}%  ({(SliderScalar <= 0.001f ? "-∞" : (20 * Math.Log10(SliderScalar)).ToString("0.0", CultureInfo.InvariantCulture))} dB)");
 
     public string SourceText => Report?.Source switch
     {
@@ -160,7 +160,7 @@ public sealed class ApoController : IDisposable
 
     void Publish(float scalar, bool muted)
     {
-        float gain = muted ? 0f : Math.Clamp(scalar, 0f, 1f);
+        float gain = muted ? 0f : Math.Max(0f, Math.Min(1f, scalar));
         lock (_gate) // controller thread and COM notification thread
         {
             if (gain == _lastWritten) return;
@@ -182,8 +182,8 @@ public sealed class ApoController : IDisposable
         lock (_gate) _status = s;
     }
 
-    public static string StatusLine(ApoStatus s) => string.Create(CultureInfo.InvariantCulture,
-        $"apo state={s.State} speaker=\"{s.SpeakerName}\" slider={s.SliderScalar:0.000} mute={(s.Muted ? 1 : 0)} " +
-        $"instances={s.Report?.Instances} source={s.Report?.Source} gain={s.Report?.TargetGain:0.000} init={s.Report?.InitKind} " +
-        $"notifs={s.Report?.Notifications} beatAge={(s.Report?.HeartbeatAgeMs is long a && a < long.MaxValue ? a : -1)}ms rate={s.Report?.SampleRate} ch={s.Report?.Channels}");
+    public static string StatusLine(ApoStatus s) =>
+        FormattableString.Invariant($"apo state={s.State} speaker=\"{s.SpeakerName}\" slider={s.SliderScalar:0.000} mute={(s.Muted ? 1 : 0)} ") +
+        FormattableString.Invariant($"instances={s.Report?.Instances} source={s.Report?.Source} gain={s.Report?.TargetGain:0.000} init={s.Report?.InitKind} ") +
+        FormattableString.Invariant($"notifs={s.Report?.Notifications} beatAge={(s.Report?.HeartbeatAgeMs is long a && a < long.MaxValue ? a : -1)}ms rate={s.Report?.SampleRate} ch={s.Report?.Channels}");
 }

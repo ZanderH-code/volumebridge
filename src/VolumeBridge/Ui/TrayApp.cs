@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Net.Http;
 using System.Reflection;
 using Microsoft.Win32;
 using VolumeBridge.Audio;
@@ -65,8 +66,8 @@ sealed class TrayApp : ApplicationContext
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
 
-        // Attach runs usbip.exe and may take a few seconds: keep it off the UI thread.
         Apo.Start();
+        Task.Run(() => Autostart.SyncPathIfInstalled(Application.ExecutablePath, _log.Write));
         CleanUpOldInstallers();
 
         if (!startHidden) ShowWindow();
@@ -142,7 +143,7 @@ sealed class TrayApp : ApplicationContext
         bool ok = a.State is ApoState.Working or ApoState.Idle;
         string tip = ok ? "VolumeBridge: " + a.VolumeText : "VolumeBridge: " + T("需要处理", "needs attention");
         _tray.Icon = ok ? _iconOk : _iconIdle;
-        _tray.Text = tip.Length > 63 ? tip[..63] : tip;
+        _tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
         if (_form.Visible) _form.ShowApo(a);
         if (DateTime.UtcNow - _lastLog >= LogEvery)
         {
@@ -167,13 +168,13 @@ sealed class TrayApp : ApplicationContext
     {
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, $"--apo-setup \"{endpointId}\"")
+            using var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, $"--apo-setup \"{endpointId}\"")
             {
                 UseShellExecute = true,
                 Verb = "runas",
                 WindowStyle = ProcessWindowStyle.Hidden,
             })!;
-            await p.WaitForExitAsync();
+            await Task.Run(() => p.WaitForExit());
             _log.Write($"apo-setup exited with {p.ExitCode}");
             Apo.Recheck();
             return p.ExitCode == 0;

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security;
 using System.Security.Principal;
 using System.Text;
+using System.Xml;
 
 namespace VolumeBridge.Audio;
 
@@ -58,24 +59,83 @@ public static class Autostart
         if (code != 0 && IsInstalled()) throw new InvalidOperationException($"schtasks /Delete failed ({code}): {output.Trim()}");
     }
 
+    /// <summary>If the logon task exists but points to a different exe (e.g. user moved the portable exe), silently update it.</summary>
+    public static void SyncPathIfInstalled(string exePath, Action<string> log)
+    {
+        try
+        {
+            var (code, output) = Run("/Query", "/TN", TaskName, "/XML");
+            if (code != 0 || string.IsNullOrWhiteSpace(output)) return;
+            var doc = new XmlDocument();
+            doc.LoadXml(output);
+            var ns = new XmlNamespaceManager(doc.NameTable);
+            ns.AddNamespace("t", "http://schemas.microsoft.com/windows/2004/02/mit/task");
+            string? cmd = doc.SelectSingleNode("//t:Actions/t:Exec/t:Command", ns)?.InnerText?.Trim().Trim('"');
+            if (string.IsNullOrEmpty(cmd)) return;
+            if (!string.Equals(Path.GetFullPath(cmd), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase))
+            {
+                Install(exePath);
+                log($"updated autostart task path: \"{cmd}\" -> \"{exePath}\"");
+            }
+        }
+        catch (Exception e)
+        {
+            log($"autostart path sync skipped: {e.Message}");
+        }
+    }
+
     static (int Code, string Output) Run(params string[] args)
     {
-        var psi = new ProcessStartInfo("schtasks.exe")
+        var psi = new ProcessStartInfo("schtasks.exe", QuoteArgs(args))
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
         if (!p.WaitForExit(15_000))
         {
-            p.Kill(entireProcessTree: true);
+            try { p.Kill(); } catch (Exception) { }
             return (-1, "timeout");
         }
         return (p.ExitCode, stdout.Result + stderr.Result);
+    }
+
+    internal static string QuoteArgs(IEnumerable<string> args)
+    {
+        var sb = new StringBuilder();
+        foreach (string a in args)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            if (a.Length == 0 || a.IndexOfAny([' ', '\t', '\n', '\v', '"']) >= 0)
+            {
+                sb.Append('"');
+                int backslashes = 0;
+                foreach (char c in a)
+                {
+                    if (c == '\\') backslashes++;
+                    else if (c == '"')
+                    {
+                        sb.Append('\\', backslashes * 2 + 1).Append('"');
+                        backslashes = 0;
+                    }
+                    else
+                    {
+                        if (backslashes > 0) { sb.Append('\\', backslashes); backslashes = 0; }
+                        sb.Append(c);
+                    }
+                }
+                if (backslashes > 0) sb.Append('\\', backslashes * 2);
+                sb.Append('"');
+            }
+            else
+            {
+                sb.Append(a);
+            }
+        }
+        return sb.ToString();
     }
 }

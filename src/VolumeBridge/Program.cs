@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using VolumeBridge.Audio;
@@ -7,7 +10,7 @@ using VolumeBridge.Ui;
 
 namespace VolumeBridge;
 
-static partial class Program
+static class Program
 {
     const string Usage = """
         VolumeBridge - make the Windows volume slider and mute control a fixed-volume USB speaker.
@@ -28,6 +31,24 @@ static partial class Program
 
     [STAThread]
     static int Main(string[] args)
+    {
+        AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+        return Run(args);
+    }
+
+    static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)
+    {
+        string? simple = new AssemblyName(args.Name).Name;
+        if (string.IsNullOrEmpty(simple)) return null;
+        using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(simple + ".dll");
+        if (s is null) return null;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return Assembly.Load(ms.ToArray());
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Run(string[] args)
     {
         string mode = args.Length == 0 ? "--gui" : args[0];
         bool gui = mode is "--gui" or "--tray" or "--updated";
@@ -55,7 +76,7 @@ static partial class Program
                 Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
                 return 0;
             case "--install-autostart":
-                return Try(() => Autostart.Install(Environment.ProcessPath!), "autostart installed");
+                return Try(() => Autostart.Install(Application.ExecutablePath), "autostart installed");
             case "--uninstall-autostart":
                 return Try(Autostart.Uninstall, "autostart removed");
             case "--apo-setup" or "--apo-remove":
@@ -101,7 +122,7 @@ static partial class Program
             MessageBox.Show($"Cannot read {configPath}: {e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;
         }
-        Loc.Current = Loc.Resolve(config.Language, ReadInstallerLanguage(), System.Globalization.CultureInfo.CurrentUICulture);
+        Loc.Current = Loc.Resolve(config.Language, CultureInfo.CurrentUICulture);
 
         int exitCode = RunGui(mode, config, dataDir, configPath);
         try { single?.ReleaseMutex(); } catch (ApplicationException) { /* not owned */ }
@@ -111,7 +132,6 @@ static partial class Program
 
     static int RunGui(string mode, AppConfig config, string dataDir, string configPath)
     {
-        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -178,17 +198,6 @@ static partial class Program
         finally { foreach (var d in list) d.Dispose(); }
     }
 
-    /// <summary>Language picked in the installer (written next to the exe), if any.</summary>
-    static string? ReadInstallerLanguage()
-    {
-        try
-        {
-            string f = Path.Combine(AppContext.BaseDirectory, Loc.InstallerChoiceFile);
-            return File.Exists(f) ? File.ReadAllText(f).Trim() : null;
-        }
-        catch (Exception) { return null; }
-    }
-
     static int Try(Action action, string done)
     {
         try
@@ -204,11 +213,11 @@ static partial class Program
         }
     }
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AttachConsole(int processId);
+    private static extern bool AttachConsole(int processId);
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AllocConsole();
+    private static extern bool AllocConsole();
 }

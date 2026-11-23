@@ -14,7 +14,7 @@ namespace VolumeBridge.Audio;
 /// Administrators get write access (same approach as Equalizer APO's configurator). The original
 /// FxProperties values are backed up once and restored on removal.
 /// </summary>
-public static partial class ApoRegistration
+public static class ApoRegistration
 {
     public const string ApoClsid = "{B2800674-8C35-428D-A3EA-750171E7DD5C}";
 
@@ -38,7 +38,7 @@ public static partial class ApoRegistration
 
     /// <summary>A CLSID string, or null for blank / all-zero entries.</summary>
     static string? RealClsid(string? s) =>
-        string.IsNullOrWhiteSpace(s) || !Guid.TryParse(s, out var g) || g == Guid.Empty ? null : s.Trim();
+        string.IsNullOrWhiteSpace(s) || !Guid.TryParse(s, out var g) || g == Guid.Empty ? null : s!.Trim();
 
     /// <summary>"Audio enhancements: Off" for this endpoint (stored in FxProperties). Readable unelevated.</summary>
     public static bool EnhancementsDisabled(string endpointId)
@@ -53,7 +53,7 @@ public static partial class ApoRegistration
     }
 
     /// <summary>"{0.0.0.00000000}.{guid}" → "{guid}" (the registry key name).</summary>
-    public static string KeyName(string endpointId) => endpointId[(endpointId.LastIndexOf('.') + 1)..];
+    public static string KeyName(string endpointId) => endpointId.Substring(endpointId.LastIndexOf('.') + 1);
 
     /// <summary>True when the endpoint's EFX slot (single or composite) contains our APO. Readable unelevated.</summary>
     public static bool IsRegistered(string endpointId)
@@ -183,7 +183,7 @@ public static partial class ApoRegistration
             string text = v switch
             {
                 string[] a => string.Join(" | ", a),
-                byte[] b => Convert.ToHexString(b.Length > 32 ? b[..32] : b) + (b.Length > 32 ? "…" : ""),
+                byte[] b => BitConverter.ToString(b, 0, Math.Min(b.Length, 32)).Replace("-", "") + (b.Length > 32 ? "…" : ""),
                 _ => v?.ToString() ?? "",
             };
             log($"  {name} [{fx.GetValueKind(name)}] = {text}");
@@ -268,7 +268,7 @@ public static partial class ApoRegistration
         audio.Refresh();
         if (audio.Status != ServiceControllerStatus.Stopped)
         {
-            try { audio.Stop(stopDependentServices: true); } catch (InvalidOperationException e) { log($"stop: {e.Message}"); }
+            try { audio.Stop(); } catch (InvalidOperationException e) { log($"stop: {e.Message}"); }
             try { audio.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30)); }
             catch (System.ServiceProcess.TimeoutException) { log("Audiosrv did not stop within 30 s"); }
         }
@@ -310,8 +310,8 @@ public static partial class ApoRegistration
         {
             if (!LookupPrivilegeValueW(null, name, out long luid)) throw new Win32Exception();
             var tp = new TokenPrivileges { Count = 1, Luid = luid, Attributes = 0x2 }; // SE_PRIVILEGE_ENABLED
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastPInvokeError() != 0)
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"cannot enable {name} (run as administrator)");
+            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), $"cannot enable {name} (run as administrator)");
         }
         finally { CloseHandle(token); }
     }
@@ -324,23 +324,23 @@ public static partial class ApoRegistration
         public int Attributes;
     }
 
-    [LibraryImport("kernel32.dll")]
-    private static partial IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
 
-    [LibraryImport("kernel32.dll")]
+    [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool CloseHandle(IntPtr h);
+    private static extern bool CloseHandle(IntPtr h);
 
-    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
+    private static extern bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
 
-    [LibraryImport("advapi32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool LookupPrivilegeValueW(string? system, string name, out long luid);
+    private static extern bool LookupPrivilegeValueW(string? system, string name, out long luid);
 
-    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AdjustTokenPrivileges(IntPtr token, [MarshalAs(UnmanagedType.Bool)] bool disableAll,
+    private static extern bool AdjustTokenPrivileges(IntPtr token, [MarshalAs(UnmanagedType.Bool)] bool disableAll,
         ref TokenPrivileges newState, int bufferLength, IntPtr previous, IntPtr returnLength);
 }

@@ -16,6 +16,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <DebugType>embedded</DebugType>
     <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
   </PropertyGroup>
 
   <ItemGroup>
