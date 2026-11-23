@@ -171,6 +171,8 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usUninstall then
+  { usDone: after our "removed" dialog is closed, so our uninstaller no longer blocks the
+    restart that usbip-win2's uninstaller offers. }
+  if CurUninstallStep = usDone then
     MaybeRemoveUsbip();
 end;
