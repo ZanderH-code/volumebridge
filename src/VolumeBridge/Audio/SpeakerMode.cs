@@ -1,12 +1,14 @@
 using System.Globalization;
 using VolumeBridge.Core;
+using VolumeBridge.Core.Dsp;
 using VolumeBridge.Core.Usb;
 
 namespace VolumeBridge.Audio;
 
 /// <summary>
-/// M1: expose "VolumeBridge Speaker" through usbip-win2 and log what Windows sends to it
-/// (volume, mute, audio level, URB timing). Nothing is played on the Flip 6 yet.
+/// Main run mode: expose "VolumeBridge Speaker" through usbip-win2, apply the volume/mute Windows
+/// sends to it, and play the audio on the real speaker. The emulated USB clock is steered to follow
+/// the speaker's clock so the buffer neither drains nor grows.
 /// </summary>
 public sealed class SpeakerMode(AppConfig config, Action<string> log)
 {
@@ -22,15 +24,26 @@ public sealed class SpeakerMode(AppConfig config, Action<string> log)
 
         var range = VolumeRange.FromDb(config.MinDb, config.MaxDb, config.VolumeStepDb);
         var device = new SpeakerDevice(range);
-        device.VolumeChanged += (vol, mute) => log(string.Create(CultureInfo.InvariantCulture,
-            $"VOLUME from Windows: {DbText(vol)} mute={(mute ? 1 : 0)} -> gain {SpeakerDevice.Gain(vol, mute):0.0000}"));
+        var bridge = new AudioBridge(Math.Clamp(config.TargetBufferMs, 5, 200), Math.Clamp(config.SmoothingMs, 1, 200));
+        var (initialVol, initialMute) = device.VolumeState;
+        bridge.TargetGain = (float)SpeakerDevice.Gain(initialVol, initialMute);
+        device.VolumeChanged += (vol, mute) =>
+        {
+            bridge.TargetGain = (float)SpeakerDevice.Gain(vol, mute);
+            log(string.Create(CultureInfo.InvariantCulture,
+                $"VOLUME from Windows: {DbText(vol)} mute={(mute ? 1 : 0)} -> gain {SpeakerDevice.Gain(vol, mute):0.0000}"));
+        };
 
         var meter = new LevelMeter();
         using var highRes = HighResWaiter.TryCreate();
         IPreciseWaiter waiter = highRes is not null ? highRes : new SleepWaiter();
         if (highRes is null) log("WARNING: high-resolution timer unavailable; URB pacing will be coarse.");
 
-        using var server = new UsbipServer(device, pcm => meter.Add(pcm, SampleKind.Pcm16), waiter, log, config.UsbipPort);
+        using var server = new UsbipServer(device, pcm =>
+        {
+            meter.Add(pcm, SampleKind.Pcm16);
+            bridge.Write(pcm);
+        }, waiter, log, config.UsbipPort);
         try { server.Start(); }
         catch (Exception e)
         {
@@ -51,7 +64,12 @@ public sealed class SpeakerMode(AppConfig config, Action<string> log)
             log($"ATTACH FAILED: {e.Message}");
             return 5;
         }
-        log($"Attached as usbip port {vhciPort}. Look for \"{SpeakerDescriptors.Product}\" in Sound settings and make it the default output.");
+        log($"Attached as usbip port {vhciPort}. Make \"{SpeakerDescriptors.Product}\" the default output in Sound settings.");
+
+        // Positive ppm = buffer too full = Windows sends faster than the speaker plays: slow the
+        // emulated USB clock down (each URB takes slightly longer). 0 while no output is running.
+        using var output = new SpeakerOutput(config, bridge, ppm => server.Clock.RateScale = 1 + ppm * 1e-6, log);
+        output.Start();
 
         try
         {
@@ -61,10 +79,12 @@ public sealed class SpeakerMode(AppConfig config, Action<string> log)
                 var (vol, mute) = device.VolumeState;
                 var (rms, peak) = meter.Read();
                 long frames = server.Stats.Frames;
+                double fill = bridge.FillMs;
                 log(string.Create(CultureInfo.InvariantCulture,
-                    $"session={(server.SessionActive ? "up" : "DOWN")} streaming={(device.PlaybackActive ? 1 : 0)} " +
-                    $"vol={DbText(vol)} mute={(mute ? 1 : 0)} level rms={Db(rms)} peak={Db(peak)} dBFS " +
-                    $"rate={frames - lastFrames}fps urbs={server.Stats.IsoUrbs} unlinks={server.Stats.Unlinks} maxLate={server.Stats.TakeMaxLateMs():0.0}ms"));
+                    $"usb={(server.SessionActive ? "up" : "DOWN")}/{(device.PlaybackActive ? "streaming" : "idle")} " +
+                    $"vol={DbText(vol)} mute={(mute ? 1 : 0)} in rms={Db(rms)} peak={Db(peak)} dBFS {frames - lastFrames}fps maxLate={server.Stats.TakeMaxLateMs():0.0}ms | " +
+                    $"out={output.Status} buffer={fill:0.0}ms device={output.PaddingMs:0.0}ms latency~{fill + output.PaddingMs:0}ms " +
+                    $"drift={bridge.Drift.Ppm:+0;-0}ppm underruns={bridge.Underruns} overruns={bridge.Overruns}"));
                 lastFrames = frames;
             }
         }

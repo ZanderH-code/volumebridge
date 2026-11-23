@@ -24,7 +24,11 @@ public sealed class AppConfig
     /// <summary>Exact endpoint ID; overrides <see cref="OutputKeywords"/> when set.</summary>
     public string? OutputDeviceId { get; set; }
 
-    public int TargetBufferMs { get; set; } = 30;
+    /// <summary>Audio kept queued between the virtual speaker and the output (latency vs. dropout safety).</summary>
+    public int TargetBufferMs { get; set; } = 20;
+
+    /// <summary>WASAPI shared-mode buffer requested from the output device.</summary>
+    public int OutputBufferMs { get; set; } = 10;
 
     /// <summary>Volume range and step advertised by "VolumeBridge Speaker" to Windows.</summary>
     public double MinDb { get; set; } = -60;

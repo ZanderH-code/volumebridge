@@ -12,13 +12,13 @@ static class Program
         VolumeBridge - make Windows volume control a fixed-volume USB speaker.
 
         Usage:
-          VolumeBridge --speaker               M1: expose "VolumeBridge Speaker" via usbip-win2 and log volume/mute/level
+          VolumeBridge --speaker               Run: "VolumeBridge Speaker" -> volume from Windows -> your USB speaker
           VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format every 200 ms
           VolumeBridge --open-logs             Open the folder with config.json and the logs
           VolumeBridge --help
 
         config.json, volumebridge.log and probe.log live next to the exe, or in %LOCALAPPDATA%\VolumeBridge
-        when installed under Program Files. Audio is not yet forwarded to the speaker (docs/PLAN.md, M2).
+        when installed under Program Files.
         """;
 
     const string MutexName = @"Global\VolumeBridge.Running";

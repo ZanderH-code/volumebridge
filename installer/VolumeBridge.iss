@@ -46,14 +46,14 @@ Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded; AfterInstall: InstallUsbip
 
 [Icons]
-Name: "{group}\VolumeBridge 测试（虚拟音箱）"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"
+Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"
 Name: "{group}\VolumeBridge 设备诊断"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--probe"; WorkingDir: "{app}"
 ; Config and logs live in %LOCALAPPDATA%\VolumeBridge of whoever runs it (Program Files stays read-only).
 Name: "{group}\打开日志文件夹"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--open-logs"
 Name: "{group}\卸载 VolumeBridge"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"; Description: "立即启动 VolumeBridge 测试（虚拟音箱）"; Flags: postinstall nowait skipifsilent runasoriginaluser unchecked
+Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"; Description: "立即启动 VolumeBridge"; Flags: postinstall nowait skipifsilent runasoriginaluser unchecked
 
 [Code]
 var

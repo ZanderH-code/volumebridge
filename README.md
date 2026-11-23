@@ -11,7 +11,7 @@
 
 ## 状态
 
-**M1 待测：** `--speaker` 模式会模拟 "VolumeBridge Speaker" 并记录 Windows 发来的音量和静音，暂不转发声音到音箱。测试步骤见 [docs/M1-TEST.md](docs/M1-TEST.md)。
+**可测试：** 安装 `VolumeBridgeSetup.exe`，把 "VolumeBridge Speaker" 设为默认输出，声音会按 Windows 音量送到 USB 音箱。测试步骤见 [docs/TEST.md](docs/TEST.md)。尚未完成：托盘图标、开机自启、自动切换默认设备（M3/M4）。
 
 - 计划与可行性评审：[docs/PLAN.md](docs/PLAN.md)
 
