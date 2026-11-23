@@ -28,6 +28,24 @@ public static partial class ApoRegistration
     const string EfxModes = "{d3993a3f-99c2-4402-b5ec-a92a0367664b},7";
     const string ModeDefault = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
     const string NoBackupMarker = "__VolumeBridge_NoFxProperties";
+    const string FxAssociation = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},0"; // PKEY_FX_Association
+    const string DisableSysFx = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";   // PKEY_AudioEndpoint_Disable_SysFx
+
+    /// <summary>A CLSID string, or null for blank / all-zero entries.</summary>
+    static string? RealClsid(string? s) =>
+        string.IsNullOrWhiteSpace(s) || !Guid.TryParse(s, out var g) || g == Guid.Empty ? null : s.Trim();
+
+    /// <summary>"Audio enhancements: Off" for this endpoint (stored in FxProperties). Readable unelevated.</summary>
+    public static bool EnhancementsDisabled(string endpointId)
+    {
+        using var fx = Registry.LocalMachine.OpenSubKey($@"{RenderRoot}\{KeyName(endpointId)}\FxProperties");
+        return fx?.GetValue(DisableSysFx) switch
+        {
+            int i => i != 0,
+            byte[] b => b.Length >= 4 && BitConverter.ToInt32(b, b.Length >= 12 ? 8 : 0) != 0, // VT_UI4 PROPVARIANT blob
+            _ => false,
+        };
+    }
 
     /// <summary>"{0.0.0.00000000}.{guid}" → "{guid}" (the registry key name).</summary>
     public static string KeyName(string endpointId) => endpointId[(endpointId.LastIndexOf('.') + 1)..];
@@ -117,21 +135,26 @@ public static partial class ApoRegistration
         Backup(guid, endpoint, log);
 
         using var fx = endpoint.CreateSubKey("FxProperties", writable: true);
-        string? single = fx.GetValue(EfxSingle) as string;
+        string? single = RealClsid(fx.GetValue(EfxSingle) as string);
         if (fx.GetValue(EfxComposite) is string[] composite)
         {
-            if (!composite.Contains(ApoClsid, StringComparer.OrdinalIgnoreCase))
-                fx.SetValue(EfxComposite, composite.Append(ApoClsid).ToArray(), RegistryValueKind.MultiString);
+            var list = composite.Select(RealClsid).OfType<string>().ToList();
+            if (!list.Contains(ApoClsid, StringComparer.OrdinalIgnoreCase)) list.Add(ApoClsid);
+            fx.SetValue(EfxComposite, list.ToArray(), RegistryValueKind.MultiString);
+            fx.DeleteValue(EfxSingle, throwOnMissingValue: false); // single and composite are mutually exclusive
         }
         else if (single is not null && !string.Equals(single, ApoClsid, StringComparison.OrdinalIgnoreCase))
         {
-            // Keep the existing endpoint effect and chain ours after it.
+            // Keep the existing endpoint effect and chain ours after it (the original stays in the backup).
             fx.SetValue(EfxComposite, new[] { single, ApoClsid }, RegistryValueKind.MultiString);
+            fx.DeleteValue(EfxSingle, throwOnMissingValue: false);
         }
         else
         {
             fx.SetValue(EfxSingle, ApoClsid, RegistryValueKind.String);
         }
+        if (fx.GetValue(FxAssociation) is null)
+            fx.SetValue(FxAssociation, "{00000000-0000-0000-0000-000000000000}", RegistryValueKind.String); // KSNODETYPE_ANY
         if (fx.GetValue(EfxModes) is not string[] modes || !modes.Contains(ModeDefault, StringComparer.OrdinalIgnoreCase))
             fx.SetValue(EfxModes, (fx.GetValue(EfxModes) as string[] ?? []).Append(ModeDefault).ToArray(), RegistryValueKind.MultiString);
         log($"APO added to endpoint {guid}");
@@ -186,13 +209,10 @@ public static partial class ApoRegistration
         using (var k = Registry.LocalMachine.OpenSubKey(path, RegistryKeyPermissionCheck.ReadWriteSubTree, RegistryRights.TakeOwnership))
         {
             if (k is null) return;
-            var sec = k.GetAccessControl(AccessControlSections.Owner);
-            if (sec.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && owner == admins) { }
-            else
-            {
-                sec.SetOwner(admins);
-                k.SetAccessControl(sec);
-            }
+            // Only WRITE_OWNER is granted before we own the key: write a fresh owner without reading the old one.
+            var sec = new RegistrySecurity();
+            sec.SetOwner(admins);
+            k.SetAccessControl(sec);
         }
         using (var k = Registry.LocalMachine.OpenSubKey(path, RegistryKeyPermissionCheck.ReadWriteSubTree, RegistryRights.ChangePermissions | RegistryRights.ReadPermissions))
         {
@@ -217,7 +237,12 @@ public static partial class ApoRegistration
         using var p = Process.Start(psi)!;
         var o = p.StandardOutput.ReadToEndAsync();
         var e = p.StandardError.ReadToEndAsync();
-        p.WaitForExit(60_000);
+        if (!p.WaitForExit(60_000))
+        {
+            try { p.Kill(entireProcessTree: true); } catch (Exception) { }
+            log($"net {args} timed out");
+            return;
+        }
         log($"net {args} -> {p.ExitCode} {(o.Result + e.Result).Trim().Replace(Environment.NewLine, " | ")}");
     }
 

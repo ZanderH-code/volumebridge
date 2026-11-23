@@ -145,7 +145,7 @@ public sealed class ApoController : IDisposable
         var report = _shared?.Read();
         bool registered = ApoRegistration.IsRegistered(target.Id) && ApoRegistration.UnsignedApoAllowed() && ApoRegistration.ComRegistered();
         ApoState state = !registered ? ApoState.NotInstalled
-            : EnhancementsDisabled(_device) ? ApoState.EnhancementsOff
+            : ApoRegistration.EnhancementsDisabled(target.Id) ? ApoState.EnhancementsOff
             : report is { Instances: > 0, HeartbeatAgeMs: < 3000 } ? ApoState.Working
             : ApoState.Idle;
         Set(new ApoStatus(state, target.Name, target.Id, scalar, muted, report));
@@ -162,19 +162,6 @@ public sealed class ApoController : IDisposable
             _lastWritten = gain;
             _shared?.WriteGain(gain);
         }
-    }
-
-    /// <summary>PKEY_AudioEndpoint_Disable_SysFx = 1 means "Audio enhancements: Off".</summary>
-    static bool EnhancementsDisabled(MMDevice device)
-    {
-        try
-        {
-            var key = new PropertyKey(new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), 5);
-            var store = device.Properties;
-            if (!store.Contains(key)) return false;
-            return store[key].Value is uint u ? u != 0 : store[key].Value is int i && i != 0;
-        }
-        catch (Exception) { return false; }
     }
 
     void Unsubscribe()

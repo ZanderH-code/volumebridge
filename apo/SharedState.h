@@ -36,5 +36,6 @@ struct VbShared
     uint32_t apoMuted;
     uint32_t apoNotifications; // count of endpoint-volume notifications received
     int32_t  apoLastError;     // last HRESULT worth reporting (0 = none)
+    uint32_t apoPid;           // audiodg process that owns apoInstances
 };
 #pragma pack(pop)

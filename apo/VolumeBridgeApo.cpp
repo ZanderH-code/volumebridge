@@ -66,8 +66,6 @@ static VbShared* OpenShared()
                             s->apoMasterVolume = -1.0f;
                             InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->magic), static_cast<LONG>(VB_SHARED_MAGIC));
                         }
-                        // A fresh audiodg process: counts left by a previous (crashed/restarted) one are stale.
-                        InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->apoInstances), 0);
                         g_shared = s; // kept mapped for the life of the process
                     }
                 }
@@ -157,23 +155,34 @@ public:
     STDMETHODIMP Initialize(UINT32 cbDataSize, BYTE* pbyData) override
     {
         if ((pbyData == nullptr) != (cbDataSize == 0)) return E_INVALIDARG;
-        m_shared = OpenShared();
+        if (m_bIsInitialized) return APOERR_ALREADY_INITIALIZED;
+        if (pbyData != nullptr && reinterpret_cast<APOInitBaseStruct*>(pbyData)->cbSize != cbDataSize) return E_INVALIDARG;
 
+        // The structures differ in layout (v3 replaced two pointers with one), so match sizes exactly.
         IMMDeviceCollection* devices = nullptr;
         UINT32 kind = 0;
-        if (cbDataSize >= sizeof(APOInitSystemEffects3))
+        BOOL discoveryOnly = FALSE;
+        if (cbDataSize == sizeof(APOInitSystemEffects3))
         {
-            devices = reinterpret_cast<APOInitSystemEffects3*>(pbyData)->pDeviceCollection;
+            auto* init = reinterpret_cast<APOInitSystemEffects3*>(pbyData);
+            devices = init->pDeviceCollection;
+            discoveryOnly = init->InitializeForDiscoveryOnly;
             kind = 3;
         }
-        else if (cbDataSize >= sizeof(APOInitSystemEffects2))
+        else if (cbDataSize == sizeof(APOInitSystemEffects2))
         {
-            devices = reinterpret_cast<APOInitSystemEffects2*>(pbyData)->pDeviceCollection;
+            auto* init = reinterpret_cast<APOInitSystemEffects2*>(pbyData);
+            devices = init->pDeviceCollection;
+            discoveryOnly = init->InitializeForDiscoveryOnly;
             kind = 2;
         }
-        else if (cbDataSize >= sizeof(APOInitSystemEffects))
+        else if (cbDataSize == sizeof(APOInitSystemEffects))
         {
             kind = 1;
+        }
+        else if (cbDataSize != 0)
+        {
+            return E_INVALIDARG;
         }
 
         if (devices != nullptr)
@@ -182,7 +191,14 @@ public:
             if (SUCCEEDED(devices->GetCount(&count)) && count > 0)
                 devices->Item(count - 1, &m_endpoint); // the last device is the audio endpoint
         }
-        if (m_shared != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInitKind), static_cast<LONG>(kind));
+
+        // Discovery-only instances (e.g. created by Settings to list effects) never process audio:
+        // keep them away from the shared state the running instance reports through.
+        if (!discoveryOnly)
+        {
+            m_shared = OpenShared();
+            if (m_shared != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInitKind), static_cast<LONG>(kind));
+        }
 
         m_bIsInitialized = true;
         return S_OK;
@@ -202,8 +218,14 @@ public:
         if (m_rampFrames == 0) m_rampFrames = 1;
 
         m_gain = TargetGain(); // start at the right level, no fade-in
+        m_rampTarget = m_gain;
+        m_rampLeft = 0;
         if (m_shared != nullptr)
         {
+            // A new audiodg process: instance counts left by a previous (crashed/restarted) one are stale.
+            const LONG pid = static_cast<LONG>(GetCurrentProcessId());
+            if (InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoPid), pid) != pid)
+                InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances), 0);
             InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
             InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoSampleRate), static_cast<LONG>(rate));
             InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoChannels), static_cast<LONG>(m_u32SamplesPerFrame));
@@ -233,21 +255,29 @@ public:
         auto* dst = reinterpret_cast<float*>(out->pBuffer);
 
         const float target = TargetGain();
-        if (in->u32BufferFlags == BUFFER_SILENT)
+        if (target != m_rampTarget)
         {
-            ZeroMemory(dst, static_cast<SIZE_T>(frames) * ch * sizeof(float)); // silent buffers may hold stale data
-            m_gain = target; // nothing audible to ramp
+            // New target: a straight 20 ms line from the current gain, across buffers.
+            m_rampTarget = target;
+            m_rampLeft = m_rampFrames;
+            m_rampStep = (target - m_gain) / static_cast<float>(m_rampFrames);
+        }
+
+        if (in->u32BufferFlags != BUFFER_VALID)
+        {
+            // Silent (or invalid) buffers may hold stale data: output silence, jump to the target.
+            ZeroMemory(dst, static_cast<SIZE_T>(frames) * ch * sizeof(float));
+            m_gain = target;
+            m_rampLeft = 0;
         }
         else
         {
             float g = m_gain;
-            const float step = (target - g) / static_cast<float>(m_rampFrames);
             for (UINT32 f = 0; f < frames; ++f)
             {
-                if (g != target)
+                if (m_rampLeft > 0)
                 {
-                    g += step;
-                    if ((step > 0 && g > target) || (step < 0 && g < target)) g = target;
+                    g = (--m_rampLeft == 0) ? m_rampTarget : g + m_rampStep;
                 }
                 const UINT32 base = f * ch;
                 for (UINT32 c = 0; c < ch; ++c) dst[base + c] = src[base + c] * g;
@@ -352,6 +382,9 @@ private:
     volatile float m_notifGain = 1.0f;
     std::atomic<bool> m_haveNotif{ false };
     float m_gain = 1.0f;
+    float m_rampTarget = 1.0f;
+    float m_rampStep = 0.0f;
+    UINT32 m_rampLeft = 0;
     UINT32 m_rampFrames = 960;
     bool m_counted = false;
 };
@@ -361,7 +394,8 @@ const CRegAPOProperties<1> VolumeBridgeApo::sm_RegProperties(
     L"VolumeBridge volume",
     L"Copyright (c) 2026 ZanderH-code (MIT)",
     1, 0,
-    __uuidof(IAudioProcessingObject));
+    __uuidof(IAudioProcessingObject),
+    static_cast<APO_FLAG>(APO_FLAG_INPLACE | DEFAULT_APOREG_FLAGS));
 
 // ---------------------------------------------------------------------------------------------
 // COM plumbing

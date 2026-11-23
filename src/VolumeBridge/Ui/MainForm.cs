@@ -38,6 +38,8 @@ sealed class MainForm : Form
     bool _settingAutostart;
     bool _settingMode;
     string? _speakerId;
+    string? _speakerName;
+    bool _speakerIsDefault = true;
     string? _virtualId;
     DateTime _lastDefaultCheck;
 
@@ -227,6 +229,7 @@ sealed class MainForm : Form
     public void ShowApo(ApoStatus a)
     {
         _speakerId = a.SpeakerId;
+        _speakerName = a.SpeakerName;
         _virtualCaption.Text = T("音量插件：", "Volume plugin:");
         _level.Visible = false;
         (string head, Color color, string detail) = a.State switch
@@ -260,14 +263,14 @@ sealed class MainForm : Form
             _lastDefaultCheck = DateTime.UtcNow;
             try
             {
-                bool isDefault = a.SpeakerId is not null && DefaultDevice.IsDefault(a.SpeakerId);
-                _makeDefault.Visible = a.SpeakerId is not null && !isDefault;
+                _speakerIsDefault = a.SpeakerId is null || DefaultDevice.IsDefault(a.SpeakerId);
+                _makeDefault.Visible = !_speakerIsDefault;
                 _virtualId = a.SpeakerId;
-                if (a.SpeakerId is not null && !isDefault)
-                    _detail.Text += T("\n注意：该音箱不是默认输出，点击“设为默认输出”。", "\nNote: the speaker is not the default output; click \"Set as default output\".");
             }
             catch (Exception) { }
         }
+        if (!_speakerIsDefault)
+            _detail.Text += T("\n注意：该音箱不是默认输出，点击“设为默认输出”。", "\nNote: the speaker is not the default output; click \"Set as default output\".");
 
         var r = a.Report;
         _stats.Text = r is null ? "" : string.Create(CultureInfo.InvariantCulture,
@@ -287,11 +290,13 @@ sealed class MainForm : Form
         catch (Exception e)
         {
             MessageBox.Show(this,
-                T($"无法自动设置默认输出：{e.Message}\n\n请在“设置 → 系统 → 声音”中手动选择 VolumeBridge Speaker。",
-                  $"Could not set the default output: {e.Message}\n\nPlease choose VolumeBridge Speaker in Settings → System → Sound."),
+                T($"无法自动设置默认输出：{e.Message}\n\n请在“设置 → 系统 → 声音”中手动选择 {DeviceForDefault}。",
+                  $"Could not set the default output: {e.Message}\n\nPlease choose {DeviceForDefault} in Settings → System → Sound."),
                 "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
+
+    string DeviceForDefault => _app.Config.ApoMode ? _speakerName ?? T("你的音箱", "your speaker") : SpeakerDescriptors.Product;
 
     sealed record OutputItem(string? Id, string Text)
     {

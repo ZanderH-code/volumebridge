@@ -39,8 +39,9 @@ static partial class Program
 
         if (!gui)
         {
-            // WinExe: reuse the parent console when started from a terminal, otherwise open one.
-            if (!AttachConsole(-1)) AllocConsole();
+            // WinExe: reuse the parent console when started from a terminal, otherwise open one —
+            // except for the plugin setup commands run hidden by the installer / the window (they log to a file).
+            if (!AttachConsole(-1) && mode is not ("--apo-setup" or "--apo-remove")) AllocConsole();
             Console.OutputEncoding = Encoding.UTF8;
         }
 
@@ -225,6 +226,11 @@ static partial class Program
             var config = File.Exists(configPath) ? AppConfig.LoadOrCreate(configPath) : new AppConfig();
             List<string> ids = args.Length > 1 ? [args[1]] : FindSpeakers(config);
             log.Write($"apo-setup for {ids.Count} endpoint(s): {string.Join(", ", ids)}");
+            if (ids.Count == 0)
+            {
+                log.Write("no matching speaker connected; nothing changed (enable it later from the VolumeBridge window)");
+                return 0;
+            }
             ApoRegistration.Install(ids, log.Write);
             return 0;
         }
@@ -242,6 +248,8 @@ static partial class Program
         var list = e.EnumerateAudioEndPoints(NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.DeviceState.Active).ToList();
         try
         {
+            if (!string.IsNullOrWhiteSpace(config.OutputDeviceId))
+                return list.Where(d => string.Equals(d.ID, config.OutputDeviceId, StringComparison.OrdinalIgnoreCase)).Select(d => d.ID).ToList();
             return list.Where(d => !d.FriendlyName.Contains(Core.Usb.SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase)
                                    && config.OutputKeywords.Any(k => k.Length > 0 && d.FriendlyName.Contains(k, StringComparison.OrdinalIgnoreCase)))
                        .Select(d => d.ID).ToList();

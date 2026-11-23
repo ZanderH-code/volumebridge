@@ -114,6 +114,7 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN VolumeBridge /F"; Flags
 [Code]
 var
   UsbipInstalledNow: Boolean;
+  AudioStopped: Boolean;
 
 const
   RunningMutex = 'Global\VolumeBridge.Running';
@@ -212,7 +213,16 @@ var
 begin
   Result := '';
   if FileExists(ExpandConstant('{app}\VolumeBridgeApo.dll')) then
-    Exec(ExpandConstant('{sys}\net.exe'), 'stop audiosrv /y', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    AudioStopped := Exec(ExpandConstant('{sys}\net.exe'), 'stop audiosrv /y', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ Whatever happened (finished, cancelled, failed), never leave Windows Audio stopped. }
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if AudioStopped then
+    Exec(ExpandConstant('{sys}\net.exe'), 'start audiosrv', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 { The app's UI follows the installer language unless the user picks another one in the app. }
@@ -289,5 +299,8 @@ begin
   { usDone: after our "removed" dialog is closed, so our uninstaller no longer blocks the
     restart that usbip-win2's uninstaller offers. }
   if CurUninstallStep = usDone then
+  begin
     MaybeRemoveUsbip();
+    RegDeleteKeyIfEmpty(HKLM64, '{#MarkerKey}');
+  end;
 end;
