@@ -47,6 +47,13 @@ jobs:
           $env:INCLUDE = "$($h.DirectoryName);$env:INCLUDE"
           $env:LIB = "$($l.DirectoryName);$env:LIB"
           ./apo/build.ps1 -Out "$PWD\out"
+          $deps = dumpbin /nologo /dependents out\VolumeBridgeApo.dll | Out-String
+          $exps = dumpbin /nologo /exports out\VolumeBridgeApo.dll | Out-String
+          $deps; $exps
+          if ($deps -match 'VCRUNTIME|MSVCP|api-ms-win-crt') { throw "APO must not depend on the VC++ runtime" }
+          foreach ($e in 'DllCanUnloadNow','DllGetClassObject','DllRegisterServer','DllUnregisterServer') {
+            if ($exps -notmatch $e) { throw "APO export $e missing" }
+          }
 
       - run: dotnet test tests/VolumeBridge.Tests -c Release
       - run: dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
