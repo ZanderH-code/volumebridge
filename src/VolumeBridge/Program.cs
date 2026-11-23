@@ -3,52 +3,125 @@ using System.Runtime.InteropServices;
 using System.Text;
 using VolumeBridge.Audio;
 using VolumeBridge.Core;
+using VolumeBridge.Ui;
 
 namespace VolumeBridge;
 
-static class Program
+static partial class Program
 {
     const string Usage = """
         VolumeBridge - make Windows volume control a fixed-volume USB speaker.
 
         Usage:
-          VolumeBridge --speaker               Run: "VolumeBridge Speaker" -> volume from Windows -> your USB speaker
-          VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format every 200 ms
+          VolumeBridge                         Open the window (closing it keeps running in the tray)
+          VolumeBridge --tray                  Start in the tray (used by autostart)
+          VolumeBridge --speaker               Console mode with a status line every second
+          VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format
+          VolumeBridge --install-autostart     Start at logon (Task Scheduler, current user)
+          VolumeBridge --uninstall-autostart
           VolumeBridge --open-logs             Open the folder with config.json and the logs
           VolumeBridge --help
 
-        config.json, volumebridge.log and probe.log live next to the exe, or in %LOCALAPPDATA%\VolumeBridge
-        when installed under Program Files.
+        config.json and logs live next to the exe, or in %LOCALAPPDATA%\VolumeBridge when installed
+        under Program Files.
         """;
 
     const string MutexName = @"Global\VolumeBridge.Running";
+    const string ShowEventName = @"Local\VolumeBridge.Show";
 
+    [STAThread]
     static int Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        string mode = args.Length == 0 ? "--gui" : args[0];
+        bool gui = mode is "--gui" or "--tray" or "--updated";
 
-        if (args.Length == 0 || args.Contains("--help") || args.Contains("-h"))
+        if (!gui)
+        {
+            // WinExe: reuse the parent console when started from a terminal, otherwise open one.
+            if (!AttachConsole(-1)) AllocConsole();
+            Console.OutputEncoding = Encoding.UTF8;
+        }
+
+        if (mode is "--help" or "-h")
         {
             Console.WriteLine(Usage);
-            return args.Length == 0 ? 1 : 0;
+            return 0;
         }
 
         string dataDir = AppPaths.DataDir();
         Directory.CreateDirectory(dataDir);
 
-        if (args[0] == "--open-logs")
+        switch (mode)
         {
-            Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
-            return 0;
+            case "--open-logs":
+                Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
+                return 0;
+            case "--install-autostart":
+                return Try(() => Autostart.Install(Environment.ProcessPath!), "autostart installed");
+            case "--uninstall-autostart":
+                return Try(Autostart.Uninstall, "autostart removed");
+            case "--gui" or "--tray" or "--updated" or "--speaker" or "--probe":
+                break;
+            default:
+                Console.Error.WriteLine($"Unknown option: {mode}\n\n{Usage}");
+                return 2;
         }
 
-        if (args[0] != "--probe" && args[0] != "--speaker")
+        // One engine per machine (GUI or --speaker). The installer waits on the same mutex.
+        Mutex? single = null;
+        if (mode != "--probe")
         {
-            Console.Error.WriteLine($"Unknown option: {args[0]}\n\n{Usage}");
+            bool first;
+            try { single = new Mutex(true, MutexName, out first); }
+            catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
+            if (!first)
+            {
+                if (gui)
+                {
+                    using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+                    show.Set(); // bring the running window to the front
+                    return 0;
+                }
+                Console.Error.WriteLine("VolumeBridge is already running.");
+                return 6;
+            }
+        }
+
+        string configPath = Path.Combine(dataDir, AppConfig.FileName);
+        AppConfig config;
+        try { config = AppConfig.LoadOrCreate(configPath); }
+        catch (Exception e)
+        {
+            if (gui) MessageBox.Show($"无法读取 {configPath}：{e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else Console.Error.WriteLine($"Cannot read {configPath}: {e.Message}");
             return 2;
         }
-        bool speaker = args[0] == "--speaker";
 
+        int exitCode = gui ? RunGui(mode, config, dataDir, configPath) : RunConsole(mode, args, config, dataDir, configPath);
+        single?.Dispose();
+        return exitCode;
+    }
+
+    static int RunGui(string mode, AppConfig config, string dataDir, string configPath)
+    {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
+        using var log = new FileLog(Path.Combine(dataDir, "volumebridge.log"));
+        log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} {mode}, {Environment.OSVersion}, config: {configPath}");
+        using var engine = new Engine(config, log.Write);
+        using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        string? notice = mode == "--updated" ? $"已更新到 {TrayApp.CurrentVersion.ToString(3)}" : null;
+        Application.ThreadException += (_, e) => log.Write($"UI error: {e.Exception}");
+        using var app = new TrayApp(engine, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
+        Application.Run(app);
+        engine.Stop();
+        return 0;
+    }
+
+    static int RunConsole(string mode, string[] args, AppConfig config, string dataDir, string configPath)
+    {
         TimeSpan? duration = null;
         int i = Array.IndexOf(args, "--seconds");
         if (i >= 0)
@@ -61,45 +134,18 @@ static class Program
             duration = TimeSpan.FromSeconds(secs);
         }
 
-        // One --speaker instance per machine, checked before touching its log file. The installer
-        // uses the same name (AppMutex) to detect a running copy.
-        Mutex? single = null;
-        if (speaker)
-        {
-            bool first;
-            try { single = new Mutex(true, MutexName, out first); }
-            catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
-            if (!first)
-            {
-                Console.Error.WriteLine("VolumeBridge is already running.");
-                return 6;
-            }
-        }
-
-        string configPath = Path.Combine(dataDir, AppConfig.FileName);
-        AppConfig config;
-        try { config = AppConfig.LoadOrCreate(configPath); }
-        catch (Exception e)
-        {
-            Console.Error.WriteLine($"Cannot read {configPath}: {e.Message}");
-            return 2;
-        }
-
         // Deliberately never disposed: console/signal handlers may still run on another thread while
-        // Main returns, and the process is exiting anyway.
+        // the method returns, and the process is exiting anyway.
         var cts = new CancellationTokenSource();
         var finished = new ManualResetEventSlim();
-
-        // First Ctrl+C stops cleanly; a second one force-exits if teardown hangs.
         Console.CancelKeyPress += (_, e) =>
         {
-            if (cts.IsCancellationRequested) return;
+            if (cts.IsCancellationRequested) return; // a second Ctrl+C force-exits
             e.Cancel = true;
             cts.Cancel();
         };
-        // Closing the console window (CTRL_CLOSE_EVENT = SIGHUP in .NET) or shutdown (SIGTERM):
-        // Windows kills the process when the handler returns or after ~5 s, so block until the run
-        // loop has detached the virtual speaker; otherwise usbip-win2 starts re-attach attempts.
+        // Closing the console window (CTRL_CLOSE_EVENT = SIGHUP in .NET) or shutdown (SIGTERM): Windows
+        // kills the process when the handler returns or after ~5 s, so wait until the virtual speaker is detached.
         void OnTerminate(PosixSignalContext ctx)
         {
             ctx.Cancel = true;
@@ -111,34 +157,55 @@ static class Program
             PosixSignalRegistration.Create(PosixSignal.SIGHUP, OnTerminate),
             PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnTerminate),
         };
+        if (duration is not null) cts.CancelAfter(duration.Value);
 
         int exitCode;
-        using (var log = new StreamWriter(Path.Combine(dataDir, speaker ? "volumebridge.log" : "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true })
-        using (var tee = new TeeWriter(Console.Out, log))
+        if (mode == "--probe")
         {
-            var version = typeof(Program).Assembly.GetName().Version;
-            tee.WriteLine($"VolumeBridge {version} {args[0]}, {Environment.OSVersion}, config: {configPath}. Ctrl+C or close the window to stop.");
-            if (!speaker)
+            using var log = new StreamWriter(Path.Combine(dataDir, "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
+            using var tee = new TeeWriter(Console.Out, log);
+            tee.WriteLine($"VolumeBridge probe, {Environment.OSVersion}. Ctrl+C or close the window to stop.");
+            exitCode = new Probe(config, tee).Run(duration, cts.Token);
+        }
+        else
+        {
+            using var log = new FileLog(Path.Combine(dataDir, "volumebridge.log")) { Echo = Console.WriteLine };
+            log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} --speaker, {Environment.OSVersion}, config: {configPath}. Ctrl+C or close the window to stop.");
+            using var engine = new Engine(config, log.Write);
+            try { exitCode = new SpeakerMode(engine, log.Write).Run(cts.Token); }
+            catch (Exception e)
             {
-                exitCode = new Probe(config, tee).Run(duration, cts.Token);
-            }
-            else
-            {
-                void Log(string s) { lock (tee) tee.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {s}"); }
-                if (duration is not null) cts.CancelAfter(duration.Value);
-                try { exitCode = new SpeakerMode(config, Log).Run(cts.Token); }
-                catch (Exception e)
-                {
-                    Log($"FATAL {e}");
-                    exitCode = 10;
-                }
+                log.Write($"FATAL {e}");
+                exitCode = 10;
             }
         }
-        single?.Dispose();
         finished.Set();
         GC.KeepAlive(signals);
         return exitCode;
     }
+
+    static int Try(Action action, string done)
+    {
+        try
+        {
+            action();
+            Console.WriteLine(done);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine(e.Message);
+            return 1;
+        }
+    }
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AttachConsole(int processId);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AllocConsole();
 
     sealed class TeeWriter(TextWriter a, TextWriter b) : TextWriter
     {

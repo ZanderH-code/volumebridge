@@ -2,7 +2,7 @@
 ; Build (CI): iscc /DAppVersion=x.y.z /DPayloadDir=<dir with VolumeBridge.exe and USBip-*.exe> installer\VolumeBridge.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.0.0"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "..\out"
@@ -32,8 +32,8 @@ OutputBaseFilename=VolumeBridgeSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; Ask the user to close a running VolumeBridge (it detaches the virtual speaker cleanly on exit).
-AppMutex=VolumeBridge.Running,Global\VolumeBridge.Running
+; A running VolumeBridge is handled in InitializeSetup/InitializeUninstall (wait for it to exit),
+; not with AppMutex, so one-click updates (silent) do not abort while the app is shutting down.
 UninstallDisplayName=VolumeBridge
 
 [Messages]
@@ -46,18 +46,55 @@ Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded; AfterInstall: InstallUsbip
 
 [Icons]
-Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"
-Name: "{group}\VolumeBridge 设备诊断"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--probe"; WorkingDir: "{app}"
-; Config and logs live in %LOCALAPPDATA%\VolumeBridge of whoever runs it (Program Files stays read-only).
-Name: "{group}\打开日志文件夹"; Filename: "{app}\VolumeBridge.exe"; Parameters: "--open-logs"
+Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"
 Name: "{group}\卸载 VolumeBridge"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\VolumeBridge.exe"; Parameters: "--speaker"; WorkingDir: "{app}"; Description: "立即启动 VolumeBridge"; Flags: postinstall nowait skipifsilent runasoriginaluser unchecked
+Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"; Description: "立即启动 VolumeBridge"; Flags: postinstall nowait skipifsilent runasoriginaluser
+; One-click update from the app runs this installer with /SILENT; reopen the app afterwards.
+Filename: "{app}\VolumeBridge.exe"; Parameters: "--updated"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: WizardSilent
+
+[UninstallRun]
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN VolumeBridge /F"; Flags: runhidden; RunOnceId: "DeleteAutostartTask"
 
 [Code]
 var
   UsbipInstalledNow: Boolean;
+
+const
+  RunningMutex = 'Global\VolumeBridge.Running';
+
+{ Waits up to TimeoutMs for a running VolumeBridge to exit; interactive runs may retry. }
+function WaitForAppExit(TimeoutMs: Integer; Silent: Boolean): Boolean;
+var
+  Waited: Integer;
+begin
+  repeat
+    Waited := 0;
+    while CheckForMutexes(RunningMutex) and (Waited < TimeoutMs) do
+    begin
+      Sleep(250);
+      Waited := Waited + 250;
+    end;
+    Result := not CheckForMutexes(RunningMutex);
+    if Result or Silent then
+      Exit;
+  until MsgBox('VolumeBridge 正在运行。请右键托盘图标选择“退出”，然后点“重试”。', mbError, MB_RETRYCANCEL) <> IDRETRY;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  { Silent = one-click update: the app is exiting by itself, give it time. Interactive: ask quickly. }
+  if WizardSilent() then
+    Result := WaitForAppExit(30000, True)
+  else
+    Result := WaitForAppExit(2000, False);
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := WaitForAppExit(5000, UninstallSilent());
+end;
 
 function InstalledUsbipVersion(): String;
 begin

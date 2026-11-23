@@ -99,3 +99,64 @@ public class AppPathsTests
         Assert.Equal(portable, AppPaths.DataDir(portable, [pf], lad)); // "pfx" is not under "pf"
     }
 }
+
+public class UpdateCheckTests
+{
+    static string Release(string tag, bool prerelease = false, string owner = "ZanderH-code/volumebridge") => $$"""
+        {"tag_name":"{{tag}}","draft":false,"prerelease":{{(prerelease ? "true" : "false")}},"html_url":"https://github.com/x",
+         "assets":[
+          {"name":"VolumeBridgeSetup.exe","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridgeSetup.exe"},
+          {"name":"VolumeBridgeSetup.exe.sha256","browser_download_url":"https://github.com/{{owner}}/releases/download/{{tag}}/VolumeBridgeSetup.exe.sha256"}]}
+        """;
+
+    [Fact]
+    public void Parse_ReadsVersionAndAssets()
+    {
+        var r = UpdateCheck.Parse(Release("v0.3.1"))!;
+        Assert.Equal(new Version(0, 3, 1), r.Version);
+        Assert.EndsWith("/v0.3.1/VolumeBridgeSetup.exe", r.SetupUrl);
+    }
+
+    [Fact]
+    public void Parse_RejectsPrereleaseAndForeignDownloadHosts()
+    {
+        Assert.Null(UpdateCheck.Parse(Release("v0.3.1", prerelease: true)));
+        Assert.Null(UpdateCheck.Parse(Release("v0.3.1", owner: "someone/else")));
+    }
+
+    [Theory]
+    [InlineData("v0.2.1", "0.2.0", true)]
+    [InlineData("v0.2.0", "0.2.0", false)]
+    [InlineData("v0.10.0", "0.9.9", true)]
+    [InlineData("v1", "0.9.9", true)]
+    [InlineData("v0.1.9-beta", "0.2.0", false)]
+    public void IsNewer_ComparesNumerically(string tag, string current, bool newer)
+    {
+        Assert.True(UpdateCheck.TryParseVersion(tag, out var v));
+        Assert.Equal(newer, UpdateCheck.IsNewer(v, Version.Parse(current)));
+    }
+
+    [Fact]
+    public void Checksum_FirstTokenOfSha256sumLine()
+    {
+        string h = new('a', 64);
+        Assert.Equal(h, UpdateCheck.ParseChecksum($"{h.ToUpperInvariant()}  VolumeBridgeSetup.exe\n"));
+        Assert.Null(UpdateCheck.ParseChecksum("not a hash"));
+    }
+}
+
+public class FileLogTests
+{
+    [Fact]
+    public void RollsOverAtLimit()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "vb-log-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, "volumebridge.log");
+        using (var log = new FileLog(path, maxBytes: 1000))
+            for (int i = 0; i < 100; i++) log.Write(new string('x', 50));
+        Assert.True(File.Exists(Path.Combine(dir, "volumebridge.1.log")));
+        Assert.True(new FileInfo(path).Length <= 1100);
+        Directory.Delete(dir, true);
+    }
+}

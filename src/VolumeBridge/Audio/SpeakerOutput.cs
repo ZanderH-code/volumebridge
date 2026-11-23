@@ -20,6 +20,7 @@ public sealed partial class SpeakerOutput : IDisposable
     readonly Action<double> _onPpm;
     readonly Action<string> _log;
     readonly CancellationTokenSource _stop = new();
+    readonly AutoResetEvent _reopen = new(false);
     readonly Thread _thread;
     string? _lastProblem;
 
@@ -33,16 +34,29 @@ public sealed partial class SpeakerOutput : IDisposable
     }
 
     /// <summary>Short status for the periodic log line.</summary>
-    public string Status { get; private set; } = "starting";
+    public string Status { get; private set; } = "启动中";
     public double PaddingMs { get; private set; }
 
     public void Start() => _thread.Start();
+
+    /// <summary>Closes the current device (if any) and looks for the output again right away.</summary>
+    public void Reopen() => _reopen.Set();
 
     public void Dispose()
     {
         _stop.Cancel();
         _thread.Join(3000);
     }
+
+    /// <summary>Plain-language text for the errors users actually meet.</summary>
+    static string Explain(Exception e) => (uint)e.HResult switch
+    {
+        0x8889000A => "被其他程序独占（例如 Voicemeeter），请退出该程序",           // AUDCLNT_E_DEVICE_IN_USE
+        0x88890004 => "设备已断开",                                              // AUDCLNT_E_DEVICE_INVALIDATED
+        0x80070005 => "暂时无法访问（锁屏、睡眠或音频服务重启中）",                 // E_ACCESSDENIED
+        0x80070490 or 0x80070002 => "设备已不存在",                                // ELEMENT_NOT_FOUND / FILE_NOT_FOUND
+        _ => $"{e.GetType().Name} 0x{e.HResult:X8} {e.Message}",
+    };
 
     void Loop()
     {
@@ -55,13 +69,15 @@ public sealed partial class SpeakerOutput : IDisposable
             // FileNotFound when the device vanished, ...); none may kill this thread.
             catch (Exception e) when (e is not OutOfMemoryException)
             {
-                Problem($"output error: {e.GetType().Name} 0x{e.HResult:X8} {e.Message}");
+                Problem($"输出错误：{Explain(e)}");
             }
             _bridge.Stop();
             _onPpm(0);
             PaddingMs = 0;
             if (started.Elapsed > TimeSpan.FromSeconds(10)) backoff = TimeSpan.FromMilliseconds(500);
-            if (_stop.Token.WaitHandle.WaitOne(backoff)) return;
+            int woke = WaitHandle.WaitAny([_stop.Token.WaitHandle, _reopen], backoff);
+            if (woke == 0) return;
+            if (woke == 1) backoff = TimeSpan.FromMilliseconds(250);
             backoff = TimeSpan.FromMilliseconds(Math.Min(backoff.TotalMilliseconds * 2, 5000));
         }
     }
@@ -86,7 +102,7 @@ public sealed partial class SpeakerOutput : IDisposable
             var match = DeviceMatcher.FindOutput(_config.OutputKeywords, _config.OutputDeviceId, infos, virtualId);
             if (match.Device is null)
             {
-                Problem($"output not available: {match.Error}");
+                Problem($"找不到输出设备：{match.Error}");
                 return;
             }
             (id, name) = (match.Device.Id, match.Device.Name);
@@ -114,7 +130,7 @@ public sealed partial class SpeakerOutput : IDisposable
         _log(string.Create(CultureInfo.InvariantCulture,
             $"output opened: \"{name}\" {fmt.SampleRate}Hz {fmt.Channels}ch {fmt.Sample}, buffer {bufferFrames * 1000.0 / fmt.SampleRate:0.0} ms, stream latency {client.StreamLatency / 10_000.0:0.0} ms"));
         _lastProblem = null;
-        Status = $"\"{name}\"";
+        Status = string.Create(CultureInfo.InvariantCulture, $"{name}（{fmt.SampleRate} Hz）");
 
         int taskIndex = 0;
         IntPtr mmcss = AvSetMmThreadCharacteristicsW("Pro Audio", ref taskIndex);
@@ -126,11 +142,11 @@ public sealed partial class SpeakerOutput : IDisposable
             render.GetBuffer(bufferFrames);
             render.ReleaseBuffer(bufferFrames, AudioClientBufferFlags.Silent);
             client.Start();
-            var waits = new WaitHandle[] { ready, _stop.Token.WaitHandle };
+            var waits = new WaitHandle[] { ready, _stop.Token.WaitHandle, _reopen };
             while (true)
             {
                 int signaled = WaitHandle.WaitAny(waits, 1000);
-                if (signaled == 1) return;
+                if (signaled is 1 or 2) return;
                 if (signaled == WaitHandle.WaitTimeout) throw new TimeoutException("render event stalled (device asleep or removed?)");
 
                 int padding = client.CurrentPadding;
@@ -150,7 +166,7 @@ public sealed partial class SpeakerOutput : IDisposable
         {
             try { client.Stop(); } catch (Exception) { /* device already gone */ }
             if (mmcss != IntPtr.Zero) AvRevertMmThreadCharacteristics(mmcss);
-            Status = "closed";
+            Status = "已关闭";
         }
     }
 

@@ -3,7 +3,11 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+
+permissions:
+  contents: write   # create releases on version tags
 
 env:
   USBIP_VERSION: 0.9.8.1
@@ -17,6 +21,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = ([xml](Get-Content src/VolumeBridge/VolumeBridge.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match <Version>$v</Version> in VolumeBridge.csproj"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - run: dotnet test tests/VolumeBridge.Tests -c Release
       - run: dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
 
@@ -33,16 +48,24 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DPayloadDir=$PWD\out" "/O$PWD\installer\output" installer\VolumeBridge.iss
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "/DPayloadDir=$PWD\out" "/O$PWD\installer\output" installer\VolumeBridge.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          $h = (Get-FileHash installer\output\VolumeBridgeSetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$h  VolumeBridgeSetup.exe" | Set-Content -NoNewline -Encoding ascii installer\output\VolumeBridgeSetup.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: VolumeBridgeSetup
-          path: installer/output/VolumeBridgeSetup.exe
+          path: |
+            installer/output/VolumeBridgeSetup.exe
+            installer/output/VolumeBridgeSetup.exe.sha256
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: VolumeBridge-win-x64
-          path: out/VolumeBridge.exe
-          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME installer/output/VolumeBridgeSetup.exe installer/output/VolumeBridgeSetup.exe.sha256 `
+            --title "VolumeBridge $env:GITHUB_REF_NAME" --notes-file docs/release-notes.md --verify-tag
