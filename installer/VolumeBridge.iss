@@ -45,10 +45,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Messages]
-english.WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs usbip-win2 {#UsbipVersion} (a signed virtual USB host driver) if needed. While the driver installs, USB 3.0 hubs restart and USB devices (speaker, keyboard, mouse) disconnect for a few seconds. This is expected.
-chinesesimplified.WelcomeLabel2=将安装 VolumeBridge {#AppVersion}。%n%n如有需要，还会安装 usbip-win2 {#UsbipVersion}（已签名的虚拟 USB 主控驱动）。安装驱动时，所有 USB 3.0 Hub 会重启，USB 设备（包括音箱、键盘、鼠标）会短暂断开几秒，属于正常现象。
+english.WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nZero-latency mode adds a small volume plugin to your speaker's audio effects. To load it, Windows' protected audio path is turned off (a few DRM players may be affected), and the Windows Audio service restarts once (sound stops for ~2 seconds). Everything is restored on uninstall.
+chinesesimplified.WelcomeLabel2=将安装 VolumeBridge {#AppVersion}。%n%n零延迟模式会在音箱的音效设置中加入一个小型音量插件。为了让 Windows 加载它，会关闭“受保护音频路径”（少数 DRM 播放可能受影响），并重启一次 Windows 音频服务（声音中断约 2 秒）。卸载时全部恢复。
 
 [CustomMessages]
+english.TaskApo=Enable the zero-latency volume plugin for the speaker now (recommended)
+chinesesimplified.TaskApo=现在为音箱启用零延迟音量插件（推荐）
+english.TaskUsbip=Install the usbip-win2 driver for the compatible mode (virtual speaker); USB devices disconnect briefly
+chinesesimplified.TaskUsbip=安装兼容模式（虚拟音箱）所需的 usbip-win2 驱动（USB 设备会短暂断开）
 english.StartApp=Start VolumeBridge now
 chinesesimplified.StartApp=立即启动 VolumeBridge
 english.AppRunning=VolumeBridge is running. Right-click its tray icon, choose "Quit", then click Retry.
@@ -68,18 +72,32 @@ chinesesimplified.RemoveUsbipAsk=VolumeBridge 安装时一并安装了 usbip-win
 english.RemoveUsbipFailed=Could not start the usbip-win2 uninstaller (%1). You can remove "USBip" in Settings → Apps.
 chinesesimplified.RemoveUsbipFailed=无法启动 usbip-win2 卸载程序（%1）。可在“设置 → 应用”中手动卸载 USBip。
 
+[Tasks]
+Name: "apo"; Description: "{cm:TaskApo}"
+Name: "usbip"; Description: "{cm:TaskUsbip}"; Flags: unchecked
+
+[Dirs]
+; Shared state between the tray app (user) and the plugin (audiodg, LOCAL SERVICE).
+Name: "{commonappdata}\VolumeBridge"; Permissions: everyone-modify
+
 [Files]
 Source: "{#PayloadDir}\VolumeBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Loaded by audiodg.exe; PrepareToInstall stops the audio service so it can be replaced.
+Source: "{#PayloadDir}\VolumeBridgeApo.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; Installed right after extraction (AfterInstall) so NeedRestart, evaluated at the end of the copy phase, sees it.
-Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded; AfterInstall: InstallUsbip
+Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: usbip; Check: UsbipNeeded; AfterInstall: InstallUsbip
 
 [Icons]
 Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"
 Name: "{group}\{cm:UninstallProgram,VolumeBridge}"; Filename: "{uninstallexe}"
 
 [Run]
+Filename: "{sys}\regsvr32.exe"; Parameters: "/s ""{app}\VolumeBridgeApo.dll"""; Flags: runhidden waituntilterminated
+Filename: "{app}\VolumeBridge.exe"; Parameters: "--apo-setup"; Flags: runhidden waituntilterminated; Tasks: apo
+; Make sure audio is running again (it was stopped for the upgrade, or not restarted by --apo-setup).
+Filename: "{sys}\net.exe"; Parameters: "start audiosrv"; Flags: runhidden waituntilterminated
 Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"; Description: "{cm:StartApp}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 ; One-click update from the app runs this installer with /SILENT; reopen the app afterwards.
 Filename: "{app}\VolumeBridge.exe"; Parameters: "--updated"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: WizardSilent
@@ -88,6 +106,9 @@ Filename: "{app}\VolumeBridge.exe"; Parameters: "--updated"; WorkingDir: "{app}"
 Type: files; Name: "{app}\language.txt"
 
 [UninstallRun]
+; Restore the speakers' original effect settings and DisableProtectedAudioDG, then unregister the plugin.
+Filename: "{app}\VolumeBridge.exe"; Parameters: "--apo-remove"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveApo"
+Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\VolumeBridgeApo.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterApo"
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN VolumeBridge /F"; Flags: runhidden; RunOnceId: "DeleteAutostartTask"
 
 [Code]
@@ -181,6 +202,17 @@ begin
   end;
   UsbipInstalledNow := True;
   RegWriteDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', 1);
+end;
+
+{ Upgrades: audiodg.exe keeps VolumeBridgeApo.dll loaded; stop the audio service so it can be replaced.
+  [Run] starts it again. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  if FileExists(ExpandConstant('{app}\VolumeBridgeApo.dll')) then
+    Exec(ExpandConstant('{sys}\net.exe'), 'stop audiosrv /y', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 { The app's UI follows the installer language unless the user picks another one in the app. }

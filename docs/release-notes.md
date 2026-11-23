@@ -1,12 +1,11 @@
-**中文** — 下载下面的 `VolumeBridgeSetup.exe` 运行即可（会自动安装 usbip-win2 驱动）。安装前请退出 Voicemeeter。使用说明见 [README](https://github.com/ZanderH-code/volumebridge/blob/main/README.zh-CN.md)。
+**中文** — 下载下面的 `VolumeBridgeSetup.exe` 运行即可。安装前请退出 Voicemeeter。使用说明见 [README](https://github.com/ZanderH-code/volumebridge/blob/main/README.zh-CN.md)。
 
-**English** — Download and run `VolumeBridgeSetup.exe` below (it installs the usbip-win2 driver). Quit Voicemeeter first. See the [README](https://github.com/ZanderH-code/volumebridge/blob/main/README.md).
+**English** — Download and run `VolumeBridgeSetup.exe` below. Quit Voicemeeter first. See the [README](https://github.com/ZanderH-code/volumebridge/blob/main/README.md).
 
 `VolumeBridgeSetup.exe.sha256` is used by the in-app updater to verify the download.
 
-### 0.2.0
-- 窗口界面 + 托盘运行，没有控制台窗口 / Window + tray, no console window
-- 一键设为默认输出、输出设备选择、开机自启、一键更新 / Set-as-default button, output picker, start at logon, one-click update
-- 音质：48 kHz 原样传递，时钟漂移靠调节虚拟时钟吸收；延迟默认约 20 ms 缓冲 / 48 kHz bit-exact path (gain only), drift absorbed by clock steering; ~20 ms default buffer
-- 安装时可选 English / 简体中文，程序界面跟随，可在窗口切换 / Installer and app in English or Simplified Chinese
-- 仅在 JBL Flip 6（USB 音频模式）上实测 / Tested with JBL Flip 6 (USB audio mode) only
+### 0.3.0
+- 新的默认模式“零延迟”：在音箱自身的音效链里加入一个音量插件（APO），按 Windows 音量滑块和静音调节，**没有附加延迟**，也不再需要虚拟音箱。 / New default "zero latency" mode: a volume plugin (APO) in the speaker's own effect chain follows the Windows slider and mute with **no added latency** and no virtual speaker.
+- 代价：关闭 Windows“受保护音频路径”（少数 DRM 播放可能受影响）；需保持该音箱“音频增强”开启；卸载时全部恢复。 / Trade-offs: Windows' protected audio path is turned off (a few DRM players may be affected); "Audio enhancements" must stay on; everything is restored on uninstall.
+- 原来的虚拟音箱方式保留为“兼容”模式，可在窗口里切换；它需要的 usbip-win2 驱动改为安装时可选。 / The virtual-speaker approach remains as "compatible" mode (switchable in the window); its usbip-win2 driver is now optional at install.
+- 仅在 JBL Flip 6（USB 音频模式）、Windows 11 上测试 / Tested with JBL Flip 6 (USB audio mode) on Windows 11 only

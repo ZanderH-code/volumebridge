@@ -23,6 +23,9 @@ sealed class MainForm : Form
     readonly Button _makeDefault = new() { AutoSize = true };
     readonly Label _outputCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _outputs = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
+    readonly Label _modeCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+    readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
+    readonly Button _enableApo = new() { AutoSize = true };
     readonly Label _languageCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _language = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
     readonly Label _stats = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Consolas", 9f) };
@@ -33,6 +36,8 @@ sealed class MainForm : Form
     readonly Label _version = new() { AutoSize = true, ForeColor = Color.Gray };
     bool _loadingOutputs;
     bool _settingAutostart;
+    bool _settingMode;
+    string? _speakerId;
     string? _virtualId;
     DateTime _lastDefaultCheck;
 
@@ -61,7 +66,8 @@ sealed class MainForm : Form
         root.Controls.Add(_volume);
         root.Controls.Add(_level);
         root.Controls.Add(Spacer());
-        root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault));
+        root.Controls.Add(Row(_modeCaption, _mode));
+        root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault, _enableApo));
         root.Controls.Add(Row(_outputCaption, _outputs));
         root.Controls.Add(Spacer());
         root.Controls.Add(_stats);
@@ -76,6 +82,9 @@ sealed class MainForm : Form
         _language.SelectedIndex = Current == UiLanguage.Chinese ? 0 : 1;
         _language.SelectedIndexChanged += (_, _) => _app.SetLanguage(_language.SelectedIndex == 0 ? UiLanguage.Chinese : UiLanguage.English);
 
+        _mode.SelectedIndexChanged += (_, _) => ModeChosen();
+        _enableApo.Click += async (_, _) => await EnableApo();
+        _enableApo.Visible = false;
         _makeDefault.Click += (_, _) => MakeDefault();
         _outputs.DropDown += (_, _) => LoadOutputs();
         _outputs.SelectedIndexChanged += (_, _) => OutputChosen();
@@ -92,8 +101,15 @@ sealed class MainForm : Form
     /// <summary>(Re)sets every fixed text in the current language.</summary>
     public void ApplyTexts()
     {
+        _modeCaption.Text = T("模式：", "Mode:");
+        _settingMode = true;
+        _mode.Items.Clear();
+        _mode.Items.AddRange([T("零延迟（音效插件，推荐）", "Zero latency (effect plugin, recommended)"),
+                              T("兼容（虚拟音箱，约 40 ms）", "Compatible (virtual speaker, ~40 ms)")]);
+        _mode.SelectedIndex = _app.Config.ApoMode ? 0 : 1;
+        _settingMode = false;
+        _enableApo.Text = T("启用插件", "Enable plugin");
         _volumeCaption.Text = T("Windows 音量", "Windows volume");
-        _virtualCaption.Text = T("虚拟音箱：", "Virtual speaker:");
         _makeDefault.Text = T("设为默认输出", "Set as default output");
         _outputCaption.Text = T("输出设备：", "Output device:");
         _languageCaption.Text = "语言 / Language:";
@@ -129,6 +145,8 @@ sealed class MainForm : Form
 
     public void ShowStatus(EngineStatus s)
     {
+        _virtualCaption.Text = T("虚拟音箱：", "Virtual speaker:");
+        _level.Visible = true;
         if (!s.Running)
         {
             _headline.Text = T("● 未运行", "● Not running");
@@ -172,6 +190,92 @@ sealed class MainForm : Form
             $"{T("时钟校正", "Clock trim")} {s.DriftPpm,5:+0;-0} ppm   {T("断音", "Underruns")} {s.Underruns}   {T("溢出", "Overruns")} {s.Overruns}");
     }
 
+    void ModeChosen()
+    {
+        if (_settingMode) return;
+        bool apo = _mode.SelectedIndex == 0;
+        if (apo == _app.Config.ApoMode) return;
+        if (MessageBox.Show(this, T("切换模式需要重新启动 VolumeBridge，现在切换吗？", "Switching modes restarts VolumeBridge. Switch now?"),
+                "VolumeBridge", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
+        {
+            _app.SwitchMode(apo);
+            return;
+        }
+        _settingMode = true;
+        _mode.SelectedIndex = _app.Config.ApoMode ? 0 : 1;
+        _settingMode = false;
+    }
+
+    async Task EnableApo()
+    {
+        if (_speakerId is null) return;
+        if (MessageBox.Show(this,
+                T("将为该音箱启用音量插件：\n\n• 允许 Windows 加载未签名的音效插件（关闭“受保护音频路径”，少数 DRM 播放可能受影响）\n• 修改该音箱的音效设置（会先备份，卸载时恢复）\n• 重新启动 Windows 音频服务（声音中断约 2 秒）\n\n需要管理员确认。继续吗？",
+                  "This enables the volume plugin for the speaker:\n\n• lets Windows load unsigned effect plugins (turns off the protected audio path; a few DRM players may be affected)\n• changes the speaker's effect settings (backed up first, restored on uninstall)\n• restarts the Windows Audio service (sound stops for ~2 s)\n\nNeeds administrator approval. Continue?"),
+                "VolumeBridge", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
+            return;
+        _enableApo.Enabled = false;
+        bool ok = await _app.EnableApoAsync(_speakerId);
+        _enableApo.Enabled = true;
+        if (!ok)
+            MessageBox.Show(this, T("启用插件失败或已取消。详情见 C:\\ProgramData\\VolumeBridge\\apo-setup.log。",
+                                    "Enabling the plugin failed or was cancelled. See C:\\ProgramData\\VolumeBridge\\apo-setup.log."),
+                "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>Zero-latency mode status.</summary>
+    public void ShowApo(ApoStatus a)
+    {
+        _speakerId = a.SpeakerId;
+        _virtualCaption.Text = T("音量插件：", "Volume plugin:");
+        _level.Visible = false;
+        (string head, Color color, string detail) = a.State switch
+        {
+            ApoState.NoSpeaker => (T("● 未找到音箱", "● Speaker not found"), Color.DarkOrange,
+                T("请连接音箱，或在下方“输出设备”中选择它。", "Connect the speaker, or pick it under \"Output device\".")),
+            ApoState.NotInstalled => (T("● 音量插件未启用", "● Volume plugin not enabled"), Color.Firebrick,
+                T($"{a.SpeakerName}：点击“启用插件”（需要管理员确认）。", $"{a.SpeakerName}: click \"Enable plugin\" (needs administrator approval).")),
+            ApoState.EnhancementsOff => (T("● 音频增强已关闭", "● Audio enhancements are off"), Color.Firebrick,
+                T("设置 → 系统 → 声音 → 该音箱 → 音频增强，改为“设备默认效果”。", "Settings → System → Sound → the speaker → Audio enhancements: set to \"Device Default Effects\".")),
+            ApoState.Idle => (T("● 已就绪（零延迟）", "● Ready (zero latency)"), Color.ForestGreen,
+                T($"{a.SpeakerName}：插件已启用，播放声音时生效。", $"{a.SpeakerName}: plugin enabled; active while audio plays.")),
+            _ => (T("● 正在工作（零延迟）", "● Working (zero latency)"), Color.ForestGreen,
+                T($"{a.SpeakerName}：音量由插件直接调节，无附加延迟。", $"{a.SpeakerName}: the plugin applies the volume with no added latency.")),
+        };
+        _headline.Text = head;
+        _headline.ForeColor = color;
+        _detail.Text = detail;
+        _volume.Text = a.VolumeText;
+
+        _enableApo.Visible = a.State == ApoState.NotInstalled;
+        _virtual.Text = a.State switch
+        {
+            ApoState.NoSpeaker => "—",
+            ApoState.NotInstalled => T("未启用", "not enabled"),
+            _ => T("已启用", "enabled"),
+        };
+
+        if (DateTime.UtcNow - _lastDefaultCheck > TimeSpan.FromSeconds(2))
+        {
+            _lastDefaultCheck = DateTime.UtcNow;
+            try
+            {
+                bool isDefault = a.SpeakerId is not null && DefaultDevice.IsDefault(a.SpeakerId);
+                _makeDefault.Visible = a.SpeakerId is not null && !isDefault;
+                _virtualId = a.SpeakerId;
+                if (a.SpeakerId is not null && !isDefault)
+                    _detail.Text += T("\n注意：该音箱不是默认输出，点击“设为默认输出”。", "\nNote: the speaker is not the default output; click \"Set as default output\".");
+            }
+            catch (Exception) { }
+        }
+
+        var r = a.Report;
+        _stats.Text = r is null ? "" : string.Create(CultureInfo.InvariantCulture,
+            $"{T("增益", "Gain")} {(r.TargetGain <= 0.0001f ? "-∞" : (20 * Math.Log10(r.TargetGain)).ToString("0.0", CultureInfo.InvariantCulture))} dB   " +
+            $"{T("音量来源", "Volume source")}: {a.SourceText}\n" +
+            $"{T("插件实例", "Plugin instances")} {r.Instances}   {r.SampleRate} Hz  {r.Channels} ch   {T("附加延迟", "Added latency")} 0 ms");
+    }
+
     void MakeDefault()
     {
         if (_virtualId is null) return;
@@ -199,7 +303,7 @@ sealed class MainForm : Form
         _loadingOutputs = true;
         try
         {
-            var cfg = _app.Engine.Config;
+            var cfg = _app.Config;
             string keywords = string.Join(" / ", cfg.OutputKeywords);
             var items = new List<OutputItem> { new(null, T($"自动（名称含 {keywords}）", $"Automatic (name contains {keywords})")) };
             using (var e = new MMDeviceEnumerator())
@@ -226,10 +330,10 @@ sealed class MainForm : Form
     void OutputChosen()
     {
         if (_loadingOutputs || _outputs.SelectedItem is not OutputItem item) return;
-        if (item.Id == _app.Engine.Config.OutputDeviceId) return;
-        _app.Engine.Config.OutputDeviceId = item.Id;
+        if (item.Id == _app.Config.OutputDeviceId) return;
+        _app.Config.OutputDeviceId = item.Id;
         _app.SaveConfig();
-        _app.Engine.ReopenOutput();
+        _app.ReopenOutput();
     }
 
     static bool SafeIsAutostart()

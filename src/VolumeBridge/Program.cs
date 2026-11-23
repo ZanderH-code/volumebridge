@@ -17,6 +17,8 @@ static partial class Program
           VolumeBridge --tray                  Start in the tray (used by autostart)
           VolumeBridge --speaker               Console mode with a status line every second
           VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format
+          VolumeBridge --apo-setup [endpointId] (admin) Add the volume plugin to the speaker(s)
+          VolumeBridge --apo-remove            (admin) Remove the plugin and restore the original settings
           VolumeBridge --install-autostart     Start at logon (Task Scheduler, current user)
           VolumeBridge --uninstall-autostart
           VolumeBridge --open-logs             Open the folder with config.json and the logs
@@ -33,7 +35,7 @@ static partial class Program
     static int Main(string[] args)
     {
         string mode = args.Length == 0 ? "--gui" : args[0];
-        bool gui = mode is "--gui" or "--tray" or "--updated";
+        bool gui = mode is "--gui" or "--tray" or "--updated" or "--relaunch";
 
         if (!gui)
         {
@@ -60,7 +62,9 @@ static partial class Program
                 return Try(() => Autostart.Install(Environment.ProcessPath!), "autostart installed");
             case "--uninstall-autostart":
                 return Try(Autostart.Uninstall, "autostart removed");
-            case "--gui" or "--tray" or "--updated" or "--speaker" or "--probe":
+            case "--apo-setup" or "--apo-remove":
+                return ApoAdmin(mode, args, dataDir);
+            case "--gui" or "--tray" or "--updated" or "--relaunch" or "--speaker" or "--probe":
                 break;
             default:
                 Console.Error.WriteLine($"Unknown option: {mode}\n\n{Usage}");
@@ -72,7 +76,13 @@ static partial class Program
         if (mode != "--probe")
         {
             bool first;
-            try { single = new Mutex(true, MutexName, out first); }
+            try
+            {
+                single = new Mutex(false, MutexName);
+                // --relaunch (mode switch / restart): wait for the previous instance to exit.
+                try { first = single.WaitOne(mode == "--relaunch" ? 15_000 : 0); }
+                catch (AbandonedMutexException) { first = true; }
+            }
             catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
             if (!first)
             {
@@ -105,6 +115,7 @@ static partial class Program
         Loc.Current = Loc.Resolve(config.Language, ReadInstallerLanguage(), System.Globalization.CultureInfo.CurrentUICulture);
 
         int exitCode = gui ? RunGui(mode, config, dataDir, configPath) : RunConsole(mode, args, config, dataDir, configPath);
+        try { single?.ReleaseMutex(); } catch (ApplicationException) { /* not owned */ }
         single?.Dispose();
         return exitCode;
     }
@@ -117,15 +128,16 @@ static partial class Program
 
         using var log = new FileLog(Path.Combine(dataDir, "volumebridge.log"));
         log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} {mode}, {Environment.OSVersion}, config: {configPath}");
-        using var engine = new Engine(config, log.Write);
+        using var engine = config.ApoMode ? null : new Engine(config, log.Write);
+        using var apo = config.ApoMode ? new ApoController(config, log.Write) : null;
         using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         string? notice = mode == "--updated"
             ? Loc.T($"已更新到 {TrayApp.CurrentVersion.ToString(3)}", $"Updated to {TrayApp.CurrentVersion.ToString(3)}")
             : null;
         Application.ThreadException += (_, e) => log.Write($"UI error: {e.Exception}");
-        using var app = new TrayApp(engine, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
+        using var app = new TrayApp(config, engine, apo, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
         Application.Run(app);
-        engine.Stop();
+        engine?.Stop();
         return 0;
     }
 
@@ -191,6 +203,50 @@ static partial class Program
         finished.Set();
         GC.KeepAlive(signals);
         return exitCode;
+    }
+
+    /// <summary>
+    /// Elevated plugin setup/removal (run by the installer, the uninstaller and the window's "Enable" button).
+    /// Logs to %ProgramData%\VolumeBridge\apo-setup.log.
+    /// </summary>
+    static int ApoAdmin(string mode, string[] args, string dataDir)
+    {
+        string logDir = Path.GetDirectoryName(ApoShared.FilePath)!;
+        Directory.CreateDirectory(logDir);
+        using var log = new FileLog(Path.Combine(logDir, "apo-setup.log")) { Echo = Console.WriteLine };
+        try
+        {
+            if (mode == "--apo-remove")
+            {
+                ApoRegistration.RemoveAll(log.Write);
+                return 0;
+            }
+            string configPath = Path.Combine(dataDir, AppConfig.FileName);
+            var config = File.Exists(configPath) ? AppConfig.LoadOrCreate(configPath) : new AppConfig();
+            List<string> ids = args.Length > 1 ? [args[1]] : FindSpeakers(config);
+            log.Write($"apo-setup for {ids.Count} endpoint(s): {string.Join(", ", ids)}");
+            ApoRegistration.Install(ids, log.Write);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            log.Write($"{mode} failed: {e}");
+            return 1;
+        }
+    }
+
+    /// <summary>All active playback devices matching the keywords (several JBL speakers may be set up).</summary>
+    static List<string> FindSpeakers(AppConfig config)
+    {
+        using var e = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+        var list = e.EnumerateAudioEndPoints(NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.DeviceState.Active).ToList();
+        try
+        {
+            return list.Where(d => !d.FriendlyName.Contains(Core.Usb.SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase)
+                                   && config.OutputKeywords.Any(k => k.Length > 0 && d.FriendlyName.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                       .Select(d => d.ID).ToList();
+        }
+        finally { foreach (var d in list) d.Dispose(); }
     }
 
     /// <summary>Language picked in the installer (written next to the exe), if any.</summary>

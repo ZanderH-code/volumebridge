@@ -78,8 +78,8 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
     {
         string exe = UsbipCli.Locate(Config.UsbipPath)
             ?? throw new EngineStartException(Loc.T(
-                "找不到 usbip-win2（usbip.exe）。请重新运行 VolumeBridge 安装包。",
-                "usbip-win2 (usbip.exe) not found. Please run the VolumeBridge installer again."));
+                "兼容模式需要 usbip-win2 驱动。请重新运行 VolumeBridge 安装包，勾选“安装 usbip-win2 驱动”。",
+                "The compatible mode needs the usbip-win2 driver. Run the VolumeBridge installer again and tick \"Install the usbip-win2 driver\"."));
         _cli = new UsbipCli(exe, log);
 
         var range = VolumeRange.FromDb(Config.MinDb, Config.MaxDb, Config.VolumeStepDb);

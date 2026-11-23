@@ -35,9 +35,12 @@ sealed class TrayApp : ApplicationContext
     DateTime _lastLog = DateTime.MinValue;
     bool _hintShown;
 
-    public TrayApp(Engine engine, FileLog log, string dataDir, string configPath, EventWaitHandle showSignal, bool startHidden, string? notice)
+    public TrayApp(AppConfig config, Engine? engine, ApoController? apo, FileLog log, string dataDir, string configPath,
+        EventWaitHandle showSignal, bool startHidden, string? notice)
     {
+        Config = config;
         Engine = engine;
+        Apo = apo;
         _log = log;
         DataDir = dataDir;
         _configPath = configPath;
@@ -65,13 +68,16 @@ sealed class TrayApp : ApplicationContext
         _timer.Start();
 
         // Attach runs usbip.exe and may take a few seconds: keep it off the UI thread.
-        _engineStart = Task.Run(() => Engine.Start());
+        _engineStart = Engine is null ? Task.CompletedTask : Task.Run(() => Engine.Start());
+        Apo?.Start();
 
         if (!startHidden) ShowWindow();
         if (notice is not null) _tray.ShowBalloonTip(5000, "VolumeBridge", notice, ToolTipIcon.Info);
     }
 
-    public Engine Engine { get; }
+    public AppConfig Config { get; }
+    public Engine? Engine { get; }
+    public ApoController? Apo { get; }
     public string DataDir { get; }
     public bool Quitting { get; private set; }
 
@@ -89,7 +95,7 @@ sealed class TrayApp : ApplicationContext
     {
         if (Current == language) return;
         Current = language;
-        Engine.Config.Language = Code(language);
+        Config.Language = Code(language);
         SaveConfig();
         ApplyTexts();
         _form.ApplyTexts();
@@ -97,31 +103,85 @@ sealed class TrayApp : ApplicationContext
 
     public void SaveConfig()
     {
-        try { File.WriteAllText(_configPath, Engine.Config.ToJson()); }
+        try { File.WriteAllText(_configPath, Config.ToJson()); }
         catch (Exception e) { _log.Write($"cannot save config: {e.Message}"); }
     }
 
     void Tick()
     {
-        var s = Engine.GetStatus();
-        bool ok = s.Running && s.OutputOpen;
+        bool ok;
+        string tip, line;
+        if (Apo is not null)
+        {
+            var a = Apo.GetStatus();
+            ok = a.State is ApoState.Working or ApoState.Idle;
+            tip = ok ? "VolumeBridge: " + a.VolumeText : "VolumeBridge: " + T("需要处理", "needs attention");
+            line = ApoController.StatusLine(a);
+            if (_form.Visible) _form.ShowApo(a);
+        }
+        else
+        {
+            var s = Engine!.GetStatus();
+            ok = s.Running && s.OutputOpen;
+            tip = !s.Running ? T("VolumeBridge：未运行", "VolumeBridge: not running")
+                : ok ? "VolumeBridge: " + (s.Mute ? T("静音", "muted") : s.VolumeText)
+                : T("VolumeBridge：等待输出设备", "VolumeBridge: waiting for the output device");
+            line = Engine.StatusLine(s);
+            if (_form.Visible) _form.ShowStatus(s);
+        }
         _tray.Icon = ok ? _iconOk : _iconIdle;
-        string tip = !s.Running ? T("VolumeBridge：未运行", "VolumeBridge: not running")
-            : ok ? "VolumeBridge: " + (s.Mute ? T("静音", "muted") : s.VolumeText)
-            : T("VolumeBridge：等待输出设备", "VolumeBridge: waiting for the output device");
         _tray.Text = tip.Length > 63 ? tip[..63] : tip;
-        if (_form.Visible) _form.ShowStatus(s);
         if (DateTime.UtcNow - _lastLog >= LogEvery)
         {
             _lastLog = DateTime.UtcNow;
-            _log.Write(Engine.StatusLine(s));
+            _log.Write(line);
         }
+    }
+
+    /// <summary>Re-reads the output selection (after the drop-down changed).</summary>
+    public void ReopenOutput()
+    {
+        Engine?.ReopenOutput();
+        Apo?.Recheck();
+    }
+
+    /// <summary>Runs the elevated plugin setup for <paramref name="endpointId"/> (one UAC prompt).</summary>
+    public async Task<bool> EnableApoAsync(string endpointId)
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, $"--apo-setup \"{endpointId}\"")
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+            })!;
+            await p.WaitForExitAsync();
+            _log.Write($"apo-setup exited with {p.ExitCode}");
+            Apo?.Recheck();
+            return p.ExitCode == 0;
+        }
+        catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1223) // UAC declined
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Saves the new mode and restarts VolumeBridge in it.</summary>
+    public void SwitchMode(bool apo)
+    {
+        Config.Mode = apo ? "apo" : "virtual";
+        SaveConfig();
+        _log.Write($"switching to mode {Config.Mode}");
+        Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--relaunch") { UseShellExecute = false });
+        Quit();
     }
 
     public void ShowWindow()
     {
         if (Quitting || _form.IsDisposed) return;
-        _form.ShowStatus(Engine.GetStatus());
+        if (Apo is not null) _form.ShowApo(Apo.GetStatus());
+        else _form.ShowStatus(Engine!.GetStatus());
         _form.Show();
         if (_form.WindowState == FormWindowState.Minimized) _form.WindowState = FormWindowState.Normal;
         _form.Activate();
@@ -149,7 +209,7 @@ sealed class TrayApp : ApplicationContext
         _timer.Stop();
         // Let an in-flight Start finish first, so Stop sees (and detaches) everything it created.
         _engineStart.Wait(TimeSpan.FromSeconds(30));
-        Engine.Stop();
+        Engine?.Stop();
         _tray.Visible = false;
         if (!_form.IsDisposed) _form.Close();
         ExitThread();

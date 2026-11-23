@@ -66,6 +66,8 @@ static VbShared* OpenShared()
                             s->apoMasterVolume = -1.0f;
                             InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->magic), static_cast<LONG>(VB_SHARED_MAGIC));
                         }
+                        // A fresh audiodg process: counts left by a previous (crashed/restarted) one are stale.
+                        InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->apoInstances), 0);
                         g_shared = s; // kept mapped for the life of the process
                     }
                 }

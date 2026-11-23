@@ -42,6 +42,11 @@ public sealed class AppConfig
     public string? UsbipPath { get; set; }
     public int SmoothingMs { get; set; } = 20;
 
+    /// <summary>"apo" = zero latency (effect plugin on the speaker itself); "virtual" = USB/IP virtual speaker.</summary>
+    public string Mode { get; set; } = "apo";
+
+    public bool ApoMode => !string.Equals(Mode, "virtual", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>UI language: "auto" (installer choice, else Windows), "zh" or "en".</summary>
     public string Language { get; set; } = "auto";
 
