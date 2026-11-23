@@ -41,7 +41,8 @@ UsePreviousLanguage=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; Official translation from jrsoftware/issrc (not yet shipped with Inno Setup 6.7.1), vendored.
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Messages]
 english.WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs usbip-win2 {#UsbipVersion} (a signed virtual USB host driver) if needed. While the driver installs, USB 3.0 hubs restart and USB devices (speaker, keyboard, mouse) disconnect for a few seconds. This is expected.
