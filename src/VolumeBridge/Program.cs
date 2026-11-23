@@ -88,13 +88,14 @@ static class Program
                 return 2;
         }
 
-        // One instance per machine. The installer waits on the same mutex.
+        // One instance per machine. After a self-update (--updated), the old process is still exiting.
         Mutex? single = null;
         bool first;
         try
         {
             single = new Mutex(false, MutexName);
-            try { first = single.WaitOne(0); }
+            int waitMs = mode == "--updated" ? 15_000 : 0;
+            try { first = single.WaitOne(waitMs); }
             catch (AbandonedMutexException) { first = true; }
         }
         catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
