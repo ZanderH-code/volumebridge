@@ -36,15 +36,25 @@ static class Program
         return Run(args);
     }
 
+    // AssemblyResolve can fire more than once for the same name (e.g. from VolumeBridge and from NAudio.Wasapi);
+    // loading the bytes twice would create two copies of every NAudio type, so each assembly is loaded once.
+    static readonly Dictionary<string, Assembly> EmbeddedAssemblies = new(StringComparer.OrdinalIgnoreCase);
+
     static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)
     {
         string? simple = new AssemblyName(args.Name).Name;
         if (string.IsNullOrEmpty(simple)) return null;
-        using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(simple + ".dll");
-        if (s is null) return null;
-        using var ms = new MemoryStream();
-        s.CopyTo(ms);
-        return Assembly.Load(ms.ToArray());
+        lock (EmbeddedAssemblies)
+        {
+            if (EmbeddedAssemblies.TryGetValue(simple!, out var loaded)) return loaded;
+            using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(simple + ".dll");
+            if (s is null) return null;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            var asm = Assembly.Load(ms.ToArray());
+            EmbeddedAssemblies[simple!] = asm;
+            return asm;
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -162,15 +172,16 @@ static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => log.Write($"{mode} crashed: {e.ExceptionObject}");
         try
         {
+            if (ApoRegistration.IsLegacyInstallerPresent())
+            {
+                // The old installed version owns %ProgramFiles%\VolumeBridge; its own uninstaller restores everything.
+                log.Write($"refusing {mode}: an older installed version of VolumeBridge (Inno Setup) is still present. Uninstall it in Settings -> Apps first.");
+                return 2;
+            }
             if (mode == "--apo-remove")
             {
                 ApoRegistration.FullRemove(log.Write);
                 return 0;
-            }
-            if (ApoRegistration.IsLegacyInstallerPresent())
-            {
-                log.Write("refusing --apo-setup: an older installed version of VolumeBridge (Inno Setup) is still present. Uninstall it in Settings -> Apps first.");
-                return 2;
             }
             string configPath = Path.Combine(dataDir, AppConfig.FileName);
             var config = File.Exists(configPath) ? AppConfig.LoadOrCreate(configPath) : new AppConfig();

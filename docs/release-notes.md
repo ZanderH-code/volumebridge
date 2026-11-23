@@ -5,7 +5,7 @@
 `VolumeBridge.exe.sha256` is used by the in-app updater to verify the download.
 
 ### 0.5.0
-- 改为单个绿色可执行文件 `VolumeBridge.exe`（基于 Windows 自带的 .NET Framework 4.8，体积约 1 MB，取代原来的 67 MB 安装包）。 / Single portable `VolumeBridge.exe` targeting in-box .NET Framework 4.8 (~1 MB instead of the 67 MB installer); no installer needed.
+- 改为单个绿色可执行文件 `VolumeBridge.exe`（基于 Windows 自带的 .NET Framework 4.8，不到 1 MB，取代原来的 67 MB 安装包）。 / Single portable `VolumeBridge.exe` targeting in-box .NET Framework 4.8 (under 1 MB instead of the 67 MB installer); no installer needed.
 - 插件部署与卸载直接内置到程序中：点**启用插件**会释放并注册内置的零延迟插件；新增**移除插件**按钮一键还原音频设置、注销插件并取消开机自启。 / Plugin deploy and removal are built into the exe: **Enable plugin** extracts and registers the embedded APO; new **Remove plugin** button restores audio settings, unregisters the plugin, and removes autostart.
 - 支持单文件原地一键更新；如果移动了 `VolumeBridge.exe` 的位置，启动时会自动同步开机自启任务路径。 / In-place single-exe self-update; moving `VolumeBridge.exe` automatically updates the logon task path at startup.
 - **从 0.4.0 升级注意：** 由于不再提供安装包资产，0.4.0 内置的更新检查会提示“已是最新版本”，请先在 **设置 → 应用** 中卸载 0.4.0，再手动下载本版本的 `VolumeBridge.exe`。 / **Upgrading from 0.4.0:** 0.4.0's updater will report "latest" because the setup asset is gone — uninstall 0.4.0 in **Settings → Apps** first, then download `VolumeBridge.exe` manually.
