@@ -36,19 +36,25 @@ public sealed class IsoClock
     static readonly long MaxReservation = 250 * TicksPerMs;
 
     readonly object _gate = new();
-    long _next;
+    double _next; // fractional ticks are carried, so small ppm corrections are not rounded away
+    double _rateScale = 1.0;
 
-    public double RateScale { get; set; } = 1.0;
+    /// <summary>Written by the output thread, read by the USB/IP thread.</summary>
+    public double RateScale
+    {
+        get => Volatile.Read(ref _rateScale);
+        set => Volatile.Write(ref _rateScale, value);
+    }
 
     /// <summary>Reserves <paramref name="packets"/> frames after the previous reservation (or after now, if idle).</summary>
     public long Reserve(int packets, long now)
     {
-        long duration = Math.Min((long)(packets * TicksPerMs * RateScale), MaxReservation);
+        double duration = Math.Min(packets * (double)TicksPerMs * RateScale, MaxReservation);
         lock (_gate)
         {
-            long start = Math.Max(_next, now);
+            double start = Math.Max(_next, now);
             _next = start + duration;
-            return _next;
+            return (long)Math.Round(_next);
         }
     }
 

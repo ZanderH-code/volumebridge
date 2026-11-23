@@ -29,8 +29,8 @@
 | 音量 | 滑块从 100% 拉到 1%，响度应连续、明显下降，日志出现 `VOLUME from Windows: ... dB` | |
 | 静音 | 按静音键完全无声，取消静音后恢复 | |
 | 爆音 | 调音量时没有咔哒声；连续播放 1 小时没有爆音、断音 | |
-| 延迟 | 看日志 `latency~`（电脑这边增加的延迟）；看视频时口型是否对得上 | |
-| 漂移 | 1 小时后 `buffer=` 仍在 20 ms 左右，`underruns`/`overruns` 不再增长 | |
+| 延迟 | 看日志 `latency~`（VolumeBridge 自身的缓冲；另有 Windows 和 USB 约 10–20 ms 未计入）；看视频时口型是否对得上 | |
+| 漂移 | 连续播放 1 小时，`buffer=` 一直在 20–30 ms，`drift=` 稳定在一个小数值（通常几十 ppm），`underruns`/`overruns` 在播放期间不增长（暂停或停止播放会让 `underruns` 加 1，属于正常） | |
 | 拔插 | 播放中拔掉 Flip 6 再插回，几秒内自动恢复出声 | |
 | 重启程序 | 关掉再打开 VolumeBridge，Windows 仍记得 VolumeBridge Speaker 是默认输出，名字没变成 "2- ..." | |
 

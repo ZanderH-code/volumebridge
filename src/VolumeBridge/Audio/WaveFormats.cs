@@ -24,12 +24,17 @@ static class WaveFormats
         };
     }
 
-    public static OutputFormat? ToOutput(WaveFormat f) => KindOf(f) switch
+    /// <summary>Null when unsupported or inconsistent (the render buffer size is derived from it).</summary>
+    public static OutputFormat? ToOutput(WaveFormat f)
     {
-        SampleKind.Float32 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Float32),
-        SampleKind.Pcm16 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int16),
-        SampleKind.Pcm24 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int24),
-        SampleKind.Pcm32 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int32),
-        _ => null,
-    };
+        OutputFormat? fmt = KindOf(f) switch
+        {
+            SampleKind.Float32 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Float32),
+            SampleKind.Pcm16 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int16),
+            SampleKind.Pcm24 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int24),
+            SampleKind.Pcm32 => new OutputFormat(f.SampleRate, f.Channels, SampleFormat.Int32),
+            _ => null,
+        };
+        return fmt is { } o && o.SampleRate > 0 && o.Channels > 0 && f.BlockAlign == o.BytesPerFrame ? o : null;
+    }
 }

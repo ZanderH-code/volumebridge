@@ -51,7 +51,9 @@ public sealed partial class SpeakerOutput : IDisposable
         {
             var started = Stopwatch.StartNew();
             try { RunOnce(); }
-            catch (Exception e) when (e is COMException or InvalidOperationException or TimeoutException or ArgumentException)
+            // NAudio maps HRESULTs to many exception types (UnauthorizedAccess on session lock/sleep,
+            // FileNotFound when the device vanished, ...); none may kill this thread.
+            catch (Exception e) when (e is not OutOfMemoryException)
             {
                 Problem($"output error: {e.GetType().Name} 0x{e.HResult:X8} {e.Message}");
             }
@@ -94,6 +96,9 @@ public sealed partial class SpeakerOutput : IDisposable
             foreach (var d in renders) d.Dispose();
         }
 
+        // The event must outlive the IAudioClient (the engine signals it while releasing the stream),
+        // so it is declared first and disposed last.
+        using var ready = new AutoResetEvent(false);
         using var device = enumerator.GetDevice(id);
         using var client = device.AudioClient;
         var mix = client.MixFormat;
@@ -101,7 +106,6 @@ public sealed partial class SpeakerOutput : IDisposable
 
         long bufferDuration = Math.Clamp(_config.OutputBufferMs, 3, 200) * 10_000L;
         client.Initialize(AudioClientShareMode.Shared, AudioClientStreamFlags.EventCallback, bufferDuration, 0, mix, Guid.Empty);
-        using var ready = new AutoResetEvent(false);
         client.SetEventHandle(ready.SafeWaitHandle.DangerousGetHandle());
         var render = client.AudioRenderClient;
         int bufferFrames = client.BufferSize;
@@ -116,9 +120,12 @@ public sealed partial class SpeakerOutput : IDisposable
         IntPtr mmcss = AvSetMmThreadCharacteristicsW("Pro Audio", ref taskIndex);
         var clock = Stopwatch.StartNew();
         double last = 0;
-        client.Start();
         try
         {
+            // Pre-fill one buffer of silence so the stream starts without a glitch.
+            render.GetBuffer(bufferFrames);
+            render.ReleaseBuffer(bufferFrames, AudioClientBufferFlags.Silent);
+            client.Start();
             var waits = new WaitHandle[] { ready, _stop.Token.WaitHandle };
             while (true)
             {
@@ -128,7 +135,7 @@ public sealed partial class SpeakerOutput : IDisposable
 
                 int padding = client.CurrentPadding;
                 int available = bufferFrames - padding;
-                PaddingMs = padding * 1000.0 / fmt.SampleRate;
+                PaddingMs = (padding + available * 0.5) * 1000.0 / fmt.SampleRate; // average device-buffer fill
                 if (available <= 0) continue;
 
                 IntPtr ptr = render.GetBuffer(available);
@@ -141,7 +148,7 @@ public sealed partial class SpeakerOutput : IDisposable
         }
         finally
         {
-            try { client.Stop(); } catch (COMException) { /* device already gone */ }
+            try { client.Stop(); } catch (Exception) { /* device already gone */ }
             if (mmcss != IntPtr.Zero) AvRevertMmThreadCharacteristics(mmcss);
             Status = "closed";
         }

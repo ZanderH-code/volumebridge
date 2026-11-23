@@ -89,11 +89,13 @@ public class AudioBridgeTests
     {
         var bridge = new AudioBridge(targetMs: 1, smoothingMs: 1) { TargetGain = 1f };
         bridge.Start(new OutputFormat(48000, 2, SampleFormat.Int16));
-        var input = Enumerable.Range(0, 96 * 2).Select(i => (short)(i * 100 - 9000)).ToArray();
+        var input = Enumerable.Range(0, 96 * 2).Select(i => (short)(i * 100 - 9000))
+            .Concat(new short[] { -32768, 32767, -16384, 16384, -1, 1, 0, 0 }).ToArray();
         bridge.Write(Pcm16(input));
+        bridge.Write(Pcm16(new short[96 * 2])); // keep enough queued to leave priming
 
-        var dst = new byte[96 * 4];
-        bridge.Render(dst, 96, 0.002);
+        var dst = new byte[input.Length * 2];
+        bridge.Render(dst, input.Length / 2, 0.002);
         for (int i = 0; i < input.Length; i++)
             Assert.Equal(input[i], BinaryPrimitives.ReadInt16LittleEndian(dst.AsSpan(2 * i)));
     }
@@ -121,9 +123,10 @@ public class AudioBridgeTests
     {
         var bridge = new AudioBridge(targetMs: 2, smoothingMs: 1) { TargetGain = 1f };
         bridge.Start(new OutputFormat(48000, 2, SampleFormat.Float32));
-        bridge.Write(Pcm16(Enumerable.Repeat((short)8000, 96 * 2).ToArray()));   // exactly 2 ms
+        bridge.Write(Pcm16(Enumerable.Repeat((short)8000, 192 * 2).ToArray()));  // 4 ms = target + one period
         var dst = new byte[96 * 8];
-        bridge.Render(dst, 96, 0.002);                       // primes and plays it all
+        bridge.Render(dst, 96, 0.002);                       // primes and plays 2 ms
+        bridge.Render(dst, 96, 0.002);                       // plays the last 2 ms
         bridge.Render(dst, 96, 0.002);                       // empty -> underrun
         Assert.Equal(1, bridge.Underruns);
         Assert.All(Enumerable.Range(0, 96 * 2), i => Assert.Equal(0f, BinaryPrimitives.ReadSingleLittleEndian(dst.AsSpan(4 * i))));
@@ -136,5 +139,36 @@ public class AudioBridgeTests
         bridge.Write(Pcm16(new short[960]));
         Assert.Equal(0, bridge.FillMs);
         Assert.Equal(480, bridge.DroppedFrames);
+    }
+}
+
+public class FloatRingTests
+{
+    [Fact]
+    public void BulkRead_WrapsAround()
+    {
+        var r = new FloatRing(4, 1);
+        r.Write([1, 2, 3]);
+        r.Discard(2);
+        r.Write([4, 5, 6]);           // wraps
+        var dst = new float[5];
+        Assert.Equal(4, r.Read(dst));
+        Assert.Equal(new float[] { 3, 4, 5, 6, 0 }, dst);
+    }
+}
+
+public class AudioBridgeUnderrunTests
+{
+    [Fact]
+    public void PartialRead_CountsUnderrun_AndReprimes()
+    {
+        var bridge = new AudioBridge(targetMs: 1, smoothingMs: 1) { TargetGain = 1f };
+        bridge.Start(new OutputFormat(48000, 2, SampleFormat.Float32));
+        var pcm = new byte[150 * 4];
+        bridge.Write(pcm);                                   // 150 frames ≥ 48 target + 96 period
+        var dst = new byte[96 * 8];
+        bridge.Render(dst, 96, 0.002);                       // 54 left
+        bridge.Render(dst, 96, 0.002);                       // only 54 of 96 available
+        Assert.Equal(1, bridge.Underruns);
     }
 }

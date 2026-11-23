@@ -28,9 +28,9 @@ public sealed class AudioBridge
 
     readonly FloatRing _ring;
     SincResampler? _resampler;
-    readonly float[] _frame = new float[InChannels];
     readonly double _targetMs;
-    readonly int _rampFrames;
+    readonly double _smoothingMs;
+    int _rampFrames = 1;
     float[] _inScratch = new float[2048];
     float[] _outScratch = new float[2048 * InChannels];
 
@@ -46,7 +46,7 @@ public sealed class AudioBridge
     public AudioBridge(double targetMs, double smoothingMs, int capacityMs = 250)
     {
         _targetMs = targetMs;
-        _rampFrames = Math.Max(1, (int)(smoothingMs * InputRate / 1000));
+        _smoothingMs = smoothingMs;
         _ring = new FloatRing(InputRate * capacityMs / 1000, InChannels);
         Drift = new DriftController(targetMs);
     }
@@ -78,12 +78,14 @@ public sealed class AudioBridge
     public void Start(OutputFormat fmt)
     {
         _fmt = fmt;
+        _rampFrames = Math.Max(1, (int)(_smoothingMs * fmt.SampleRate / 1000));
         _ring.Clear();
         _resampler = fmt.SampleRate == InputRate ? null : new SincResampler(InChannels, InputRate, fmt.SampleRate);
         Drift.Reset();
         _priming = true;
-        _gain = _targetGain;
-        _lastTarget = _targetGain;
+        float g = _targetGain; // read once: a concurrent change must not split gain and its ramp target
+        _gain = g;
+        _lastTarget = g;
         _gainStep = 0;
         _outputActive = true;
     }
@@ -109,7 +111,9 @@ public sealed class AudioBridge
             _priming = true;
             Interlocked.Increment(ref _underruns);
         }
-        if (_priming && fill >= _targetMs)
+        double periodMs = frames * 1000.0 / fmt.SampleRate;
+        // Leave priming only when, after this read, the target is still buffered.
+        if (_priming && fill >= _targetMs + periodMs)
         {
             _priming = false;
             _resampler?.Reset();
@@ -123,6 +127,11 @@ public sealed class AudioBridge
         if (_outScratch.Length < frames * InChannels) _outScratch = new float[frames * InChannels];
         var buf = _outScratch.AsSpan(0, frames * InChannels);
         int produced = _priming ? 0 : _resampler?.Process(_ring, buf, frames) ?? ReadDirect(buf, frames);
+        if (!_priming && produced < frames)
+        {
+            _priming = true; // ran dry mid-period: count it and re-prime instead of leaving gaps
+            Interlocked.Increment(ref _underruns);
+        }
         buf[(produced * InChannels)..].Clear();
 
         ApplyGain(buf, frames);
@@ -131,16 +140,7 @@ public sealed class AudioBridge
         return _priming ? Drift.Ppm : Drift.Update(FillMs, dtSeconds);
     }
 
-    int ReadDirect(Span<float> buf, int frames)
-    {
-        for (int n = 0; n < frames; n++)
-        {
-            if (!_ring.TryReadFrame(_frame)) return n;
-            buf[2 * n] = _frame[0];
-            buf[2 * n + 1] = _frame[1];
-        }
-        return frames;
-    }
+    int ReadDirect(Span<float> buf, int frames) => _ring.Read(buf[..(frames * InChannels)]);
 
     void ApplyGain(Span<float> buf, int frames)
     {
@@ -191,12 +191,17 @@ public sealed class AudioBridge
         switch (s)
         {
             case SampleFormat.Float32: BinaryPrimitives.WriteSingleLittleEndian(d, v); break;
-            case SampleFormat.Int16: BinaryPrimitives.WriteInt16LittleEndian(d, (short)Math.Round(v * 32767f)); break;
+            // Same scale as the input (÷32768), so 16-bit samples round-trip exactly.
+            case SampleFormat.Int16:
+                BinaryPrimitives.WriteInt16LittleEndian(d, (short)Math.Clamp(Math.Round(v * 32768.0), short.MinValue, short.MaxValue));
+                break;
             case SampleFormat.Int24:
-                int x = (int)Math.Round(v * 8388607f);
+                int x = (int)Math.Clamp(Math.Round(v * 8388608.0), -8388608, 8388607);
                 d[0] = (byte)x; d[1] = (byte)(x >> 8); d[2] = (byte)(x >> 16);
                 break;
-            case SampleFormat.Int32: BinaryPrimitives.WriteInt32LittleEndian(d, (int)Math.Clamp(Math.Round(v * 2147483647.0), int.MinValue, int.MaxValue)); break;
+            case SampleFormat.Int32:
+                BinaryPrimitives.WriteInt32LittleEndian(d, (int)Math.Clamp(Math.Round(v * 2147483648.0), int.MinValue, int.MaxValue));
+                break;
         }
     }
 }

@@ -29,6 +29,21 @@ public sealed class FloatRing(int capacityFrames, int channels)
         }
     }
 
+    /// <summary>Removes up to dst.Length / Channels frames into <paramref name="dst"/>; returns frames read.</summary>
+    public int Read(Span<float> dst)
+    {
+        lock (_gate)
+        {
+            int frames = Math.Min(dst.Length / Channels, _count);
+            int first = Math.Min(frames, CapacityFrames - _readFrame);
+            _buf.AsSpan(_readFrame * Channels, first * Channels).CopyTo(dst);
+            _buf.AsSpan(0, (frames - first) * Channels).CopyTo(dst[(first * Channels)..]);
+            _readFrame = (_readFrame + frames) % CapacityFrames;
+            _count -= frames;
+            return frames;
+        }
+    }
+
     /// <summary>Removes one frame into <paramref name="frame"/>; false if empty.</summary>
     public bool TryReadFrame(Span<float> frame)
     {
