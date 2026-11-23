@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.ServiceProcess;
 using Microsoft.Win32;
 
 namespace VolumeBridge.Audio;
@@ -253,29 +254,52 @@ public static partial class ApoRegistration
         }
     }
 
-    /// <summary>Restarts the Windows Audio service so audiodg reloads the effect chain (sound pauses ~2 s).</summary>
+    /// <summary>
+    /// Restarts Windows Audio (like Equalizer APO) so audiodg rebuilds the effect chain: remembers which
+    /// dependent services were running, waits for a clean stop, retries the start, then brings the
+    /// dependents back. Throws if Windows Audio is not running afterwards.
+    /// </summary>
     public static void RestartAudioService(Action<string> log)
     {
-        // The endpoint builder caches endpoint effect settings; restart it too (this also stops audiosrv).
-        RunNet("stop audiosrv /y", log);
-        RunNet("stop AudioEndpointBuilder /y", log);
-        RunNet("start AudioEndpointBuilder", log);
-        RunNet("start audiosrv", log);
-    }
+        using var audio = new ServiceController("Audiosrv");
+        var dependents = audio.DependentServices.Where(d => d.Status == ServiceControllerStatus.Running).Select(d => d.ServiceName).ToList();
+        log($"restarting Audiosrv (running dependents: {(dependents.Count == 0 ? "none" : string.Join(", ", dependents))})");
 
-    static void RunNet(string args, Action<string> log)
-    {
-        var psi = new ProcessStartInfo("net.exe", args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        using var p = Process.Start(psi)!;
-        var o = p.StandardOutput.ReadToEndAsync();
-        var e = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(60_000))
+        audio.Refresh();
+        if (audio.Status != ServiceControllerStatus.Stopped)
         {
-            try { p.Kill(entireProcessTree: true); } catch (Exception) { }
-            log($"net {args} timed out");
-            return;
+            try { audio.Stop(stopDependentServices: true); } catch (InvalidOperationException e) { log($"stop: {e.Message}"); }
+            try { audio.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30)); }
+            catch (System.ServiceProcess.TimeoutException) { log("Audiosrv did not stop within 30 s"); }
         }
-        log($"net {args} -> {p.ExitCode} {(o.Result + e.Result).Trim().Replace(Environment.NewLine, " | ")}");
+
+        for (int attempt = 1; ; attempt++)
+        {
+            audio.Refresh();
+            if (audio.Status == ServiceControllerStatus.Running) break;
+            try
+            {
+                if (audio.Status is ServiceControllerStatus.Stopped) audio.Start();
+                audio.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(15));
+            }
+            catch (Exception e) when (e is InvalidOperationException or System.ServiceProcess.TimeoutException)
+            {
+                log($"start attempt {attempt}: {e.Message}");
+                if (attempt >= 4) throw new InvalidOperationException("Windows Audio could not be started again; please restart Windows.");
+                Thread.Sleep(1000);
+            }
+        }
+        log("Audiosrv running");
+
+        foreach (var name in dependents)
+        {
+            try
+            {
+                using var dep = new ServiceController(name);
+                if (dep.Status == ServiceControllerStatus.Stopped) dep.Start();
+            }
+            catch (Exception e) { log($"could not restart dependent {name}: {e.Message}"); }
+        }
     }
 
     static void EnablePrivilege(string name)

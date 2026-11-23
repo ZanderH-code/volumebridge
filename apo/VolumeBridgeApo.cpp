@@ -71,9 +71,9 @@ static void ApoLog(const wchar_t* fmt, ...)
     wchar_t path[MAX_PATH];
     HANDLE f = INVALID_HANDLE_VALUE;
     if (DataPath(path, MAX_PATH, L"apo-log.txt"))
-        f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        f = CreateFileW(path, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE && GetTempPathW(MAX_PATH, path) > 0 && SUCCEEDED(StringCchCatW(path, MAX_PATH, L"VolumeBridge-apo-log.txt")))
-        f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        f = CreateFileW(path, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f != INVALID_HANDLE_VALUE)
     {
         LARGE_INTEGER size{};
