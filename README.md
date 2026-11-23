@@ -72,32 +72,15 @@ When Windows 11 delivers APO volume notifications to the plugin, the plugin work
 
 ## How it works
 
-VolumeBridge includes two modes. You can switch between them in the app window.
-
-| Mode | How it works | Added latency | System audio changes |
-| --- | --- | --- | --- |
-| **Zero-latency (default)** | Endpoint-effect APO plugin inside the speaker's own effect chain | None (in-place) | Sets `DisableProtectedAudioDG=1`; restored on uninstall |
-| **Compatible (fallback)** | USB/IP virtual speaker (`VolumeBridge Speaker`) forwarding to the real speaker | ~40–60 ms | None (uses optional `usbip-win2` driver) |
-
-### Zero-latency mode (default)
-
 ```text
 Apps ──▶ Your USB speaker (default output)
            └ VolumeBridge volume plugin (EFX APO in audiodg): applies slider × max-volume cap in place (20 ms ramp)
 ```
 
-- Runs as an unsigned endpoint-effect Audio Processing Object (EFX APO) inside the Windows audio engine (`audiodg`).
+- Runs as an unsigned endpoint-effect Audio Processing Object (EFX APO) inside the Windows audio engine (`audiodg`), so audio is attenuated in place with no extra buffering.
 - Reads volume from Windows 11 APO volume notifications; the tray app also passes the slider state via shared memory as a fallback.
 - Coexists with the speaker's existing **Microsoft Audio Home Theater Effects**.
-
-### Compatible mode (fallback)
-
-```text
-Apps ──▶ "VolumeBridge Speaker" (USB/IP virtual speaker) ──▶ Software gain ──▶ Your USB speaker
-```
-
-- Emulates a standard USB audio device over USB/IP using [usbip-win2](https://github.com/vadimgrn/usbip-win2) (available as an optional task in the installer).
-- Leaves Windows audio settings untouched, at the cost of ~40–60 ms of latency.
+- Turning the protected audio path off (`DisableProtectedAudioDG=1`) and the speaker's effect settings are restored on uninstall.
 
 ## Configuration and logs
 
@@ -108,14 +91,10 @@ Settings in `%LOCALAPPDATA%\VolumeBridge\config.json`:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `mode` | `"apo"` | `"apo"` for zero-latency mode; `"virtual"` for compatible mode |
 | `maxOutputDb` | `-12` | Output level at 100% slider (dB); `0` = speaker's full level |
 | `outputKeywords` | `["JBL", "Zgmicro"]` | Case-insensitive name keywords for automatic device selection |
 | `outputDeviceId` | `null` | Fixed output endpoint ID (set by the device picker) |
 | `language` | `"auto"` | `"en"`, `"zh"`, or `"auto"` (follows installer choice) |
-| `targetBufferMs` / `outputBufferMs` | `20` / `10` | Compatible-mode audio buffering (ms) |
-| `minDb` / `maxDb` / `volumeStepDb` | `-60` / `0` / `0.25` | Compatible-mode volume range and step advertised to Windows |
-| `usbipPort` | `3240` | Compatible-mode local USB/IP TCP port |
 
 ## Building from source
 
@@ -128,8 +107,6 @@ The GitHub Actions workflow (`.github/workflows/build.yml`) builds the C++ APO (
 
 ## Credits and licenses
 
-- Compatible mode's UAC1 device and USB/IP server are adapted from [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables) (BSD-2-Clause).
-- [usbip-win2](https://github.com/vadimgrn/usbip-win2) (BSD-2-Clause) is optionally bundled, unmodified.
 - [NAudio](https://github.com/naudio/NAudio) (MIT).
 - APO registration follows the public behaviour of [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) (no GPL code is copied).
 - Full third-party notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). VolumeBridge is licensed under the [MIT License](LICENSE).

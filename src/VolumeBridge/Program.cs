@@ -10,22 +10,17 @@ namespace VolumeBridge;
 static partial class Program
 {
     const string Usage = """
-        VolumeBridge - make Windows volume control a fixed-volume USB speaker.
+        VolumeBridge - make the Windows volume slider and mute control a fixed-volume USB speaker.
 
         Usage:
-          VolumeBridge                         Open the window (closing it keeps running in the tray)
-          VolumeBridge --tray                  Start in the tray (used by autostart)
-          VolumeBridge --speaker               Console mode with a status line every second
-          VolumeBridge --probe [--seconds N]   Print Windows audio devices, volume, mute, format
+          VolumeBridge                          Open the window (closing it keeps running in the tray)
+          VolumeBridge --tray                   Start in the tray (used by autostart)
           VolumeBridge --apo-setup [endpointId] (admin) Add the volume plugin to the speaker(s)
-          VolumeBridge --apo-remove            (admin) Remove the plugin and restore the original settings
-          VolumeBridge --install-autostart     Start at logon (Task Scheduler, current user)
+          VolumeBridge --apo-remove             (admin) Remove the plugin and restore the original settings
+          VolumeBridge --install-autostart      Start at logon (Task Scheduler, current user)
           VolumeBridge --uninstall-autostart
-          VolumeBridge --open-logs             Open the folder with config.json and the logs
+          VolumeBridge --open-logs              Open the folder with config.json and the logs
           VolumeBridge --help
-
-        config.json and logs live next to the exe, or in %LOCALAPPDATA%\VolumeBridge when installed
-        under Program Files.
         """;
 
     const string MutexName = @"Global\VolumeBridge.Running";
@@ -39,34 +34,13 @@ static partial class Program
 
         if (!gui)
         {
-            // WinExe: reuse the parent console when started from a terminal, otherwise open one —
-            // except for the plugin setup commands run hidden by the installer / the window (they log to a file).
+            // WinExe: print to the parent console when started from a terminal. The plugin setup
+            // commands are also run hidden (installer, Enable button) and log to a file instead.
             bool console = AttachConsole(-1) || (mode is not ("--apo-setup" or "--apo-remove") && AllocConsole());
-            // Setting the console code page throws when there is no console at all.
             if (console)
             {
                 try { Console.OutputEncoding = Encoding.UTF8; } catch (IOException) { }
             }
-        }
-        if (mode is "--apo-setup" or "--apo-remove")
-        {
-            // Whatever goes wrong before the setup log is open must still leave a trace.
-            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            {
-                try
-                {
-                    string dir = Path.GetDirectoryName(ApoShared.FilePath)!;
-                    Directory.CreateDirectory(dir);
-                    File.AppendAllText(Path.Combine(dir, "apo-setup.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {mode} crashed: {e.ExceptionObject}{Environment.NewLine}");
-                }
-                catch (Exception) { }
-            };
-        }
-
-        if (mode is "--help" or "-h")
-        {
-            Console.WriteLine(Usage);
-            return 0;
         }
 
         string dataDir = AppPaths.DataDir();
@@ -74,6 +48,9 @@ static partial class Program
 
         switch (mode)
         {
+            case "--help" or "-h":
+                Console.WriteLine(Usage);
+                return 0;
             case "--open-logs":
                 Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
                 return 0;
@@ -83,42 +60,37 @@ static partial class Program
                 return Try(Autostart.Uninstall, "autostart removed");
             case "--apo-setup" or "--apo-remove":
                 return ApoAdmin(mode, args, dataDir);
-            case "--gui" or "--tray" or "--updated" or "--relaunch" or "--speaker" or "--probe":
+            case "--gui" or "--tray" or "--updated" or "--relaunch":
                 break;
             default:
                 Console.Error.WriteLine($"Unknown option: {mode}\n\n{Usage}");
                 return 2;
         }
 
-        // One engine per machine (GUI or --speaker). The installer waits on the same mutex.
+        // One instance per machine. The installer waits on the same mutex.
         Mutex? single = null;
-        if (mode != "--probe")
+        bool first;
+        try
         {
-            bool first;
-            try
+            single = new Mutex(false, MutexName);
+            try { first = single.WaitOne(mode == "--relaunch" ? 15_000 : 0); }
+            catch (AbandonedMutexException) { first = true; }
+        }
+        catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
+        if (!first)
+        {
+            // Bring the running window to the front, except for the (delayed) logon task, which must stay hidden.
+            if (mode != "--tray")
             {
-                single = new Mutex(false, MutexName);
-                // --relaunch (mode switch / restart): wait for the previous instance to exit.
-                try { first = single.WaitOne(mode == "--relaunch" ? 15_000 : 0); }
-                catch (AbandonedMutexException) { first = true; }
-            }
-            catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
-            if (!first)
-            {
-                // Bring the running window to the front, except for the (delayed) logon task, which must stay hidden.
-                if (gui && mode != "--tray")
+                try
                 {
-                    try
-                    {
-                        using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-                        show.Set();
-                    }
-                    catch (UnauthorizedAccessException) { /* running instance is elevated */ }
+                    using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+                    show.Set();
                 }
-                if (gui) return 0;
-                Console.Error.WriteLine("VolumeBridge is already running.");
-                return 6;
+                catch (UnauthorizedAccessException) { /* running instance is elevated */ }
             }
+            single?.Dispose();
+            return 0;
         }
 
         string configPath = Path.Combine(dataDir, AppConfig.FileName);
@@ -126,14 +98,12 @@ static partial class Program
         try { config = AppConfig.LoadOrCreate(configPath); }
         catch (Exception e)
         {
-            if (gui) MessageBox.Show($"Cannot read {configPath}: {e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else Console.Error.WriteLine($"Cannot read {configPath}: {e.Message}");
+            MessageBox.Show($"Cannot read {configPath}: {e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;
         }
-
         Loc.Current = Loc.Resolve(config.Language, ReadInstallerLanguage(), System.Globalization.CultureInfo.CurrentUICulture);
 
-        int exitCode = gui ? RunGui(mode, config, dataDir, configPath) : RunConsole(mode, args, config, dataDir, configPath);
+        int exitCode = RunGui(mode, config, dataDir, configPath);
         try { single?.ReleaseMutex(); } catch (ApplicationException) { /* not owned */ }
         single?.Dispose();
         return exitCode;
@@ -147,81 +117,15 @@ static partial class Program
 
         using var log = new FileLog(Path.Combine(dataDir, "volumebridge.log"));
         log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} {mode}, {Environment.OSVersion}, config: {configPath}");
-        using var engine = config.ApoMode ? null : new Engine(config, log.Write);
-        using var apo = config.ApoMode ? new ApoController(config, log.Write) : null;
+        using var apo = new ApoController(config, log.Write);
         using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         string? notice = mode == "--updated"
             ? Loc.T($"已更新到 {TrayApp.CurrentVersion.ToString(3)}", $"Updated to {TrayApp.CurrentVersion.ToString(3)}")
             : null;
         Application.ThreadException += (_, e) => log.Write($"UI error: {e.Exception}");
-        using var app = new TrayApp(config, engine, apo, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
+        using var app = new TrayApp(config, apo, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
         Application.Run(app);
-        engine?.Stop();
         return 0;
-    }
-
-    static int RunConsole(string mode, string[] args, AppConfig config, string dataDir, string configPath)
-    {
-        TimeSpan? duration = null;
-        int i = Array.IndexOf(args, "--seconds");
-        if (i >= 0)
-        {
-            if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out int secs) || secs <= 0)
-            {
-                Console.Error.WriteLine("--seconds needs a positive integer");
-                return 2;
-            }
-            duration = TimeSpan.FromSeconds(secs);
-        }
-
-        // Deliberately never disposed: console/signal handlers may still run on another thread while
-        // the method returns, and the process is exiting anyway.
-        var cts = new CancellationTokenSource();
-        var finished = new ManualResetEventSlim();
-        Console.CancelKeyPress += (_, e) =>
-        {
-            if (cts.IsCancellationRequested) return; // a second Ctrl+C force-exits
-            e.Cancel = true;
-            cts.Cancel();
-        };
-        // Closing the console window (CTRL_CLOSE_EVENT = SIGHUP in .NET) or shutdown (SIGTERM): Windows
-        // kills the process when the handler returns or after ~5 s, so wait until the virtual speaker is detached.
-        void OnTerminate(PosixSignalContext ctx)
-        {
-            ctx.Cancel = true;
-            cts.Cancel();
-            finished.Wait(4000);
-        }
-        var signals = new[]
-        {
-            PosixSignalRegistration.Create(PosixSignal.SIGHUP, OnTerminate),
-            PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnTerminate),
-        };
-        if (duration is not null) cts.CancelAfter(duration.Value);
-
-        int exitCode;
-        if (mode == "--probe")
-        {
-            using var log = new StreamWriter(Path.Combine(dataDir, "probe.log"), append: false, Encoding.UTF8) { AutoFlush = true };
-            using var tee = new TeeWriter(Console.Out, log);
-            tee.WriteLine($"VolumeBridge probe, {Environment.OSVersion}. Ctrl+C or close the window to stop.");
-            exitCode = new Probe(config, tee).Run(duration, cts.Token);
-        }
-        else
-        {
-            using var log = new FileLog(Path.Combine(dataDir, "volumebridge.log")) { Echo = Console.WriteLine };
-            log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} --speaker, {Environment.OSVersion}, config: {configPath}. Ctrl+C or close the window to stop.");
-            using var engine = new Engine(config, log.Write);
-            try { exitCode = new SpeakerMode(engine, log.Write).Run(cts.Token); }
-            catch (Exception e)
-            {
-                log.Write($"FATAL {e}");
-                exitCode = 10;
-            }
-        }
-        finished.Set();
-        GC.KeepAlive(signals);
-        return exitCode;
     }
 
     /// <summary>
@@ -233,6 +137,8 @@ static partial class Program
         string logDir = Path.GetDirectoryName(ApoShared.FilePath)!;
         Directory.CreateDirectory(logDir);
         using var log = new FileLog(Path.Combine(logDir, "apo-setup.log"), append: true) { Echo = Console.WriteLine };
+        // Whatever goes wrong must still leave a trace.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => log.Write($"{mode} crashed: {e.ExceptionObject}");
         try
         {
             if (mode == "--apo-remove")
@@ -259,18 +165,15 @@ static partial class Program
         }
     }
 
-    /// <summary>All active playback devices matching the keywords (several JBL speakers may be set up).</summary>
+    /// <summary>All active playback devices matching the configured speaker.</summary>
     static List<string> FindSpeakers(AppConfig config)
     {
         using var e = new NAudio.CoreAudioApi.MMDeviceEnumerator();
         var list = e.EnumerateAudioEndPoints(NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.DeviceState.Active).ToList();
         try
         {
-            if (!string.IsNullOrWhiteSpace(config.OutputDeviceId))
-                return list.Where(d => string.Equals(d.ID, config.OutputDeviceId, StringComparison.OrdinalIgnoreCase)).Select(d => d.ID).ToList();
-            return list.Where(d => !d.FriendlyName.Contains(Core.Usb.SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase)
-                                   && config.OutputKeywords.Any(k => k.Length > 0 && d.FriendlyName.Contains(k, StringComparison.OrdinalIgnoreCase)))
-                       .Select(d => d.ID).ToList();
+            var infos = list.Select(d => new DeviceInfo(d.ID, d.FriendlyName)).ToList();
+            return DeviceMatcher.AllMatches(config.OutputKeywords, config.OutputDeviceId, infos).Select(d => d.Id).ToList();
         }
         finally { foreach (var d in list) d.Dispose(); }
     }
@@ -308,12 +211,4 @@ static partial class Program
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool AllocConsole();
-
-    sealed class TeeWriter(TextWriter a, TextWriter b) : TextWriter
-    {
-        public override Encoding Encoding => Encoding.UTF8;
-        public override void Write(char value) { a.Write(value); b.Write(value); }
-        public override void Write(string? value) { a.Write(value); b.Write(value); }
-        public override void WriteLine(string? value) { a.WriteLine(value); b.WriteLine(value); }
-    }
 }

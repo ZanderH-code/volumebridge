@@ -2,7 +2,6 @@ using System.Globalization;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 using VolumeBridge.Core;
-using VolumeBridge.Core.Usb;
 using static VolumeBridge.Core.Loc;
 
 namespace VolumeBridge.Audio;
@@ -123,8 +122,7 @@ public sealed class ApoController : IDisposable
         try
         {
             var infos = renders.Select(d => new DeviceInfo(d.ID, d.FriendlyName)).ToList();
-            string? virtualId = infos.FirstOrDefault(d => d.Name.Contains(SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase))?.Id;
-            target = DeviceMatcher.FindOutput(_config.OutputKeywords, _config.OutputDeviceId, infos, virtualId).Device;
+            target = DeviceMatcher.FindOutput(_config.OutputKeywords, _config.OutputDeviceId, infos).Device;
         }
         finally { foreach (var d in renders) d.Dispose(); }
 

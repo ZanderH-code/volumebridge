@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
-using VolumeBridge.Core.Usb;
 
 namespace VolumeBridge.Audio;
 
@@ -10,18 +9,6 @@ namespace VolumeBridge.Audio;
 /// </summary>
 public static class DefaultDevice
 {
-    /// <summary>Endpoint ID of "VolumeBridge Speaker", or null when it is not attached.</summary>
-    public static string? FindVirtualSpeakerId()
-    {
-        using var e = new MMDeviceEnumerator();
-        var list = e.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        try
-        {
-            return list.FirstOrDefault(d => d.FriendlyName.Contains(SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase))?.ID;
-        }
-        finally { foreach (var d in list) d.Dispose(); }
-    }
-
     public static bool IsDefault(string id)
     {
         using var e = new MMDeviceEnumerator();

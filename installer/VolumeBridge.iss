@@ -1,5 +1,5 @@
-﻿; VolumeBridge installer: VolumeBridge.exe + bundled usbip-win2 (virtual USB host driver).
-; Build (CI): iscc /DAppVersion=x.y.z /DPayloadDir=<dir with VolumeBridge.exe and USBip-*.exe> installer\VolumeBridge.iss
+﻿; VolumeBridge installer: VolumeBridge.exe + the zero-latency volume plugin (VolumeBridgeApo.dll).
+; Build (CI): iscc /DAppVersion=x.y.z /DPayloadDir=<dir with VolumeBridge.exe and VolumeBridgeApo.dll> installer\VolumeBridge.iss
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -7,8 +7,7 @@
 #ifndef PayloadDir
   #define PayloadDir "..\out"
 #endif
-#define UsbipVersion "0.9.8.1"
-#define UsbipSetup "USBip-" + UsbipVersion + "-x64.exe"
+; Versions up to 0.3.x could install usbip-win2; uninstall still offers to remove it.
 ; AppId of usbip-win2's own Inno Setup installer (userspace/innosetup/setup.iss).
 #define UsbipUninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1"
 #define MarkerKey "Software\VolumeBridge"
@@ -26,7 +25,6 @@ DisableDirPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; usbip-win2 requires Windows 10 1903+.
 MinVersion=10.0.18362
 OutputBaseFilename=VolumeBridgeSetup
 Compression=lzma2
@@ -51,22 +49,10 @@ chinesesimplified.WelcomeLabel2=将安装 VolumeBridge {#AppVersion}。%n%n零�
 [CustomMessages]
 english.TaskApo=Enable the zero-latency volume plugin for the speaker now (recommended)
 chinesesimplified.TaskApo=现在为音箱启用零延迟音量插件（推荐）
-english.TaskUsbip=Install the usbip-win2 driver for the compatible mode (virtual speaker); USB devices disconnect briefly
-chinesesimplified.TaskUsbip=安装兼容模式（虚拟音箱）所需的 usbip-win2 驱动（USB 设备会短暂断开）
 english.StartApp=Start VolumeBridge now
 chinesesimplified.StartApp=立即启动 VolumeBridge
 english.AppRunning=VolumeBridge is running. Right-click its tray icon, choose "Quit", then click Retry.
 chinesesimplified.AppRunning=VolumeBridge 正在运行。请右键托盘图标选择“退出”，然后点“重试”。
-english.InstallingUsbip=Installing usbip-win2 {#UsbipVersion} (USB devices will briefly disconnect)...
-chinesesimplified.InstallingUsbip=正在安装 usbip-win2 {#UsbipVersion}（USB 设备会短暂断开）……
-english.UsbipFailed=usbip-win2 could not be installed: %1%n%nVolumeBridge is installed, but the virtual speaker needs usbip-win2. Please report this with a screenshot.
-chinesesimplified.UsbipFailed=usbip-win2 未能安装：%1%n%nVolumeBridge 已安装，但虚拟音箱需要 usbip-win2 才能工作。请截图告知开发者。
-english.UsbipCannotStart=its installer could not be started (%1)
-chinesesimplified.UsbipCannotStart=无法启动安装程序（%1）
-english.UsbipExitCode=exit code %1. Code 1 may mean the driver requires test signing.
-chinesesimplified.UsbipExitCode=退出码 %1。若为 1，可能是该驱动要求开启测试签名。
-english.UsbipVersionMismatch=the installer finished, but the installed version is still not {#UsbipVersion} (found: %1).
-chinesesimplified.UsbipVersionMismatch=安装程序已结束，但检测到的版本仍不是 {#UsbipVersion}（当前：%1）。
 english.RemoveUsbipAsk=VolumeBridge installed the usbip-win2 driver. Remove it too?%n%n(Choose No if other software uses usbip-win2. Its uninstaller asks for a restart when done.)
 chinesesimplified.RemoveUsbipAsk=VolumeBridge 安装时一并安装了 usbip-win2 驱动。是否也卸载它？%n%n（如果其他软件也在使用 usbip-win2，请选“否”。它的卸载程序会在完成后提示重启。）
 english.RemoveUsbipFailed=Could not start the usbip-win2 uninstaller (%1). You can remove "USBip" in Settings → Apps.
@@ -74,7 +60,6 @@ chinesesimplified.RemoveUsbipFailed=无法启动 usbip-win2 卸载程序（%1）
 
 [Tasks]
 Name: "apo"; Description: "{cm:TaskApo}"
-Name: "usbip"; Description: "{cm:TaskUsbip}"; Flags: unchecked
 
 [Dirs]
 ; Shared state between the tray app (user) and the plugin (audiodg, LOCAL SERVICE).
@@ -86,8 +71,6 @@ Source: "{#PayloadDir}\VolumeBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\VolumeBridgeApo.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
-; Installed right after extraction (AfterInstall) so NeedRestart, evaluated at the end of the copy phase, sees it.
-Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: usbip; Check: UsbipNeeded; AfterInstall: InstallUsbip
 
 [Icons]
 Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"
@@ -113,7 +96,6 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN VolumeBridge /F"; Flags
 
 [Code]
 var
-  UsbipInstalledNow: Boolean;
   AudioStopped: Boolean;
 
 const
@@ -155,56 +137,6 @@ begin
   Result := WaitForAppExit(5000, UninstallSilent());
 end;
 
-function InstalledUsbipVersion(): String;
-begin
-  if not RegQueryStringValue(HKLM64, '{#UsbipUninstallKey}', 'DisplayVersion', Result) then
-    Result := '';
-end;
-
-{ True when usbip-win2 is missing, unparsable or older than the bundled version. }
-function UsbipNeeded(): Boolean;
-var
-  Installed: String;
-  A, B: Int64;
-begin
-  Installed := InstalledUsbipVersion();
-  if (Installed <> '') and StrToVersion(Installed, A) and StrToVersion('{#UsbipVersion}', B) then
-    Result := ComparePackedVersion(A, B) < 0
-  else
-    Result := True;
-end;
-
-procedure UsbipFailed(const Msg: String);
-begin
-  SuppressibleMsgBox(FmtMessage(CustomMessage('UsbipFailed'), [Msg]), mbCriticalError, MB_OK, IDOK);
-end;
-
-procedure InstallUsbip();
-var
-  ResultCode: Integer;
-begin
-  WizardForm.StatusLabel.Caption := CustomMessage('InstallingUsbip');
-  if not Exec(ExpandConstant('{tmp}\{#UsbipSetup}'),
-      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /COMPONENTS="main,client"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    UsbipFailed(FmtMessage(CustomMessage('UsbipCannotStart'), [SysErrorMessage(ResultCode)]));
-    Exit;
-  end;
-  if ResultCode <> 0 then
-  begin
-    UsbipFailed(FmtMessage(CustomMessage('UsbipExitCode'), [IntToStr(ResultCode)]));
-    Exit;
-  end;
-  if UsbipNeeded() then
-  begin
-    UsbipFailed(FmtMessage(CustomMessage('UsbipVersionMismatch'), [InstalledUsbipVersion()]));
-    Exit;
-  end;
-  UsbipInstalledNow := True;
-  RegWriteDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', 1);
-end;
-
 { Upgrades: audiodg.exe keeps VolumeBridgeApo.dll loaded; stop the audio service so it can be
   replaced. The Run section starts it again. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -237,12 +169,6 @@ begin
   else
     Lang := 'en';
   SaveStringToFile(ExpandConstant('{app}\language.txt'), Lang, False);
-end;
-
-{ usbip-win2 asks for a reboot (AlwaysRestart=yes); offer it, but the user may test first. }
-function NeedRestart(): Boolean;
-begin
-  Result := UsbipInstalledNow;
 end;
 
 { "C:\...\unins000.exe" /LOG  ->  C:\...\unins000.exe }

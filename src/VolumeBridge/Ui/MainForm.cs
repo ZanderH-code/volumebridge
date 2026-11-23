@@ -4,7 +4,6 @@ using System.Globalization;
 using NAudio.CoreAudioApi;
 using VolumeBridge.Audio;
 using VolumeBridge.Core;
-using VolumeBridge.Core.Usb;
 using static VolumeBridge.Core.Loc;
 
 namespace VolumeBridge.Ui;
@@ -17,14 +16,11 @@ sealed class MainForm : Form
     readonly Label _detail = new() { AutoSize = true, MaximumSize = new Size(440, 0), ForeColor = Color.DimGray };
     readonly Label _volumeCaption = new() { AutoSize = true, ForeColor = Color.Gray };
     readonly Label _volume = new() { AutoSize = true, Font = new Font("Microsoft YaHei UI", 20f, FontStyle.Bold) };
-    readonly ProgressBar _level = new() { Width = 300, Height = 10, Maximum = 600 };
     readonly Label _virtualCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly Label _virtual = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly Button _makeDefault = new() { AutoSize = true };
     readonly Label _outputCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _outputs = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
-    readonly Label _modeCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
-    readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
     readonly Button _enableApo = new() { AutoSize = true };
     readonly Label _capCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly NumericUpDown _cap = new() { Minimum = -30, Maximum = 0, Increment = 1, Width = 60 };
@@ -39,7 +35,6 @@ sealed class MainForm : Form
     readonly Label _version = new() { AutoSize = true, ForeColor = Color.Gray };
     bool _loadingOutputs;
     bool _settingAutostart;
-    bool _settingMode;
     string? _speakerId;
     string? _speakerName;
     bool _speakerIsDefault = true;
@@ -69,9 +64,7 @@ sealed class MainForm : Form
         root.Controls.Add(Spacer());
         root.Controls.Add(_volumeCaption);
         root.Controls.Add(_volume);
-        root.Controls.Add(_level);
         root.Controls.Add(Spacer());
-        root.Controls.Add(Row(_modeCaption, _mode));
         root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault, _enableApo));
         root.Controls.Add(Row(_outputCaption, _outputs));
         root.Controls.Add(Row(_capCaption, _cap, _capUnit));
@@ -90,7 +83,6 @@ sealed class MainForm : Form
 
         _cap.Value = (decimal)Math.Clamp(Math.Round(_app.Config.MaxOutputDb), -30, 0);
         _cap.ValueChanged += (_, _) => _app.SetMaxOutputDb((double)_cap.Value);
-        _mode.SelectedIndexChanged += (_, _) => ModeChosen();
         _enableApo.Click += async (_, _) => await EnableApo();
         _enableApo.Visible = false;
         _makeDefault.Click += (_, _) => MakeDefault();
@@ -109,15 +101,8 @@ sealed class MainForm : Form
     /// <summary>(Re)sets every fixed text in the current language.</summary>
     public void ApplyTexts()
     {
-        _modeCaption.Text = T("模式：", "Mode:");
         _capCaption.Text = T("最大音量（滑块 100% 时）：", "Maximum volume (slider at 100%):");
         _capUnit.Text = T("dB（0 = 音箱原始最大音量）", "dB (0 = the speaker's own full level)");
-        _settingMode = true;
-        _mode.Items.Clear();
-        _mode.Items.AddRange([T("零延迟（音效插件，推荐）", "Zero latency (effect plugin, recommended)"),
-                              T("兼容（虚拟音箱，约 40 ms）", "Compatible (virtual speaker, ~40 ms)")]);
-        _mode.SelectedIndex = _app.Config.ApoMode ? 0 : 1;
-        _settingMode = false;
         _enableApo.Text = T("启用插件", "Enable plugin");
         _volumeCaption.Text = T("Windows 音量", "Windows volume");
         _makeDefault.Text = T("设为默认输出", "Set as default output");
@@ -153,69 +138,6 @@ sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    public void ShowStatus(EngineStatus s)
-    {
-        _virtualCaption.Text = T("虚拟音箱：", "Virtual speaker:");
-        _level.Visible = true;
-        if (!s.Running)
-        {
-            _headline.Text = T("● 未运行", "● Not running");
-            _headline.ForeColor = Color.Firebrick;
-            _detail.Text = s.StartError ?? T("正在启动…", "Starting…");
-        }
-        else if (!s.OutputOpen)
-        {
-            _headline.Text = T("● 等待输出设备", "● Waiting for the output device");
-            _headline.ForeColor = Color.DarkOrange;
-            _detail.Text = s.OutputText;
-        }
-        else
-        {
-            _headline.Text = T("● 正在工作", "● Working");
-            _headline.ForeColor = Color.ForestGreen;
-            _detail.Text = T("输出到 ", "Playing on ") + s.OutputText;
-        }
-
-        _volume.Text = s.Mute ? T("静音", "Muted") : s.VolumeText;
-        double db = double.IsNegativeInfinity(s.InPeakDb) ? -60 : Math.Clamp(s.InPeakDb, -60, 0);
-        _level.Value = s.Mute ? 0 : (int)((db + 60) * 10);
-
-        if (DateTime.UtcNow - _lastDefaultCheck > TimeSpan.FromSeconds(2))
-        {
-            _lastDefaultCheck = DateTime.UtcNow;
-            try
-            {
-                _virtualId = s.UsbConnected ? DefaultDevice.FindVirtualSpeakerId() : null;
-                bool isDefault = _virtualId is not null && DefaultDevice.IsDefault(_virtualId);
-                _virtual.Text = _virtualId is null ? T("未接入", "not attached")
-                    : isDefault ? T("已接入，是默认输出 ✓", "attached, default output ✓")
-                    : T("已接入，但不是默认输出", "attached, but not the default output");
-                _makeDefault.Visible = _virtualId is not null && !isDefault;
-            }
-            catch (Exception) { /* audio service busy; retry on the next tick */ }
-        }
-
-        _stats.Text = string.Create(CultureInfo.InvariantCulture,
-            $"{T("缓冲", "Buffer")} {s.BufferMs,5:0.0} ms   {T("设备", "Device")} {s.DeviceMs,5:0.0} ms   {T("延迟约", "Latency ~")} {s.LatencyMs,3:0} ms\n" +
-            $"{T("时钟校正", "Clock trim")} {s.DriftPpm,5:+0;-0} ppm   {T("断音", "Underruns")} {s.Underruns}   {T("溢出", "Overruns")} {s.Overruns}");
-    }
-
-    void ModeChosen()
-    {
-        if (_settingMode) return;
-        bool apo = _mode.SelectedIndex == 0;
-        if (apo == _app.Config.ApoMode) return;
-        if (MessageBox.Show(this, T("切换模式需要重新启动 VolumeBridge，现在切换吗？", "Switching modes restarts VolumeBridge. Switch now?"),
-                "VolumeBridge", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
-        {
-            _app.SwitchMode(apo);
-            return;
-        }
-        _settingMode = true;
-        _mode.SelectedIndex = _app.Config.ApoMode ? 0 : 1;
-        _settingMode = false;
-    }
-
     async Task EnableApo()
     {
         if (_speakerId is null) return;
@@ -239,7 +161,6 @@ sealed class MainForm : Form
         _speakerId = a.SpeakerId;
         _speakerName = a.SpeakerName;
         _virtualCaption.Text = T("音量插件：", "Volume plugin:");
-        _level.Visible = false;
         (string head, Color color, string detail) = a.State switch
         {
             ApoState.NoSpeaker => (T("● 未找到音箱", "● Speaker not found"), Color.DarkOrange,
@@ -304,7 +225,7 @@ sealed class MainForm : Form
         }
     }
 
-    string DeviceForDefault => _app.Config.ApoMode ? _speakerName ?? T("你的音箱", "your speaker") : SpeakerDescriptors.Product;
+    string DeviceForDefault => _speakerName ?? T("你的音箱", "your speaker");
 
     sealed record OutputItem(string? Id, string Text)
     {
@@ -323,8 +244,7 @@ sealed class MainForm : Form
             {
                 foreach (var d in e.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList())
                 {
-                    if (!d.FriendlyName.Contains(SpeakerDescriptors.Product, StringComparison.OrdinalIgnoreCase))
-                        items.Add(new OutputItem(d.ID, d.FriendlyName));
+                    items.Add(new OutputItem(d.ID, d.FriendlyName));
                     d.Dispose();
                 }
             }

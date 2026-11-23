@@ -9,10 +9,6 @@ on:
 permissions:
   contents: write   # create releases on version tags
 
-env:
-  USBIP_VERSION: 0.9.8.1
-  USBIP_SHA256: 38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a
-
 jobs:
   build:
     runs-on: windows-latest
@@ -57,14 +53,6 @@ jobs:
 
       - run: dotnet test tests/VolumeBridge.Tests -c Release
       - run: dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
-
-      - name: Download usbip-win2 (pinned, hash-checked)
-        shell: pwsh
-        run: |
-          $name = "USBip-$env:USBIP_VERSION-x64.exe"
-          Invoke-WebRequest "https://github.com/vadimgrn/usbip-win2/releases/download/v.$env:USBIP_VERSION/$name" -OutFile "out/$name"
-          $hash = (Get-FileHash "out/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne $env:USBIP_SHA256) { throw "usbip-win2 hash mismatch: $hash" }
 
       - name: Build installer
         shell: pwsh

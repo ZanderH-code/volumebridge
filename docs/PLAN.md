@@ -1,4 +1,14 @@
-# VolumeBridge 实施计划（v3：自带虚拟 USB 音箱，经 Neon 评审修订）
+# VolumeBridge 实施计划
+
+> **现状（0.4.0）**：产品只保留**零延迟 APO 模式**（`apo/VolumeBridgeApo.cpp`，音箱端点效果 EFX），已在 JBL Flip 6 + Windows 11 26H2 上实测可用。下文的 v3 虚拟音箱方案（USB/IP + UAC1）曾作为 0.2.x–0.3.x 的"兼容模式"发布，0.4.0 起已移除，代码保留在 Git 历史中（标签 v0.3.3 及以前）。
+>
+> APO 调试中的关键经验：
+> - Windows 音频引擎以 **COM 聚合**方式创建 APO，类工厂必须接受 pUnkOuter（0.3.0–0.3.2 因拒绝聚合而从未生效）；
+> - 音箱的 FxProperties 为微软 SFX（,5）+ MFX（,6）+ 我们的 EFX（,7），没有旧版 LFX/GFX；
+> - 升级时必须先启动 audiosrv 再执行插件设置，否则枚举不到设备；
+> - 卡住时对照 Equalizer APO 的源码，而不是猜。
+
+# v3 设计记录（自带虚拟 USB 音箱，经 Neon 评审修订）
 
 目标：一个安装包，装完后 Windows 音量滑块和静音键就能控制 JBL Flip 6（USB 音频模式下它不响应系统音量）。
 

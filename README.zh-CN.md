@@ -72,32 +72,15 @@ Voicemeeter 需要经过虚拟声卡再二次输出，会引入延迟、占用�
 
 ## 工作原理
 
-VolumeBridge 提供两种工作模式，可在主窗口里随时切换：
-
-| 模式 | 原理 | 附加延迟 | 系统音频改动 |
-| --- | --- | --- | --- |
-| **零延迟模式（默认）** | 在音箱自己的音效链中挂载端点效果 APO 插件 | 无（原地处理） | 设置 `DisableProtectedAudioDG=1`，卸载时还原 |
-| **兼容模式（备选）** | 通过 USB/IP 模拟虚拟音箱（`VolumeBridge Speaker`）再转发 | 约 40–60 ms | 无（安装时可选安装 `usbip-win2` 驱动） |
-
-### 零延迟模式（默认）
-
 ```text
 应用程序 ──▶ 你的 USB 音箱（默认输出）
                └ VolumeBridge 音量插件（audiodg 中的 EFX APO）：按“滑块 × 最大音量上限”原地衰减（20 ms 平滑）
 ```
 
-- 以未签名的端点效果音频处理对象（EFX APO）运行在 Windows 音频引擎（`audiodg`）中。
+- 以未签名的端点效果音频处理对象（EFX APO）运行在 Windows 音频引擎（`audiodg`）中，原地处理，没有额外缓冲。
 - 优先使用 Windows 11 的 APO 音量通知；托盘程序同时通过共享内存传递滑块状态作为兜底。
 - 与音箱原有的 **Microsoft Audio Home Theater Effects** 共存。
-
-### 兼容模式（备选）
-
-```text
-应用程序 ──▶ "VolumeBridge Speaker"（USB/IP 虚拟音箱）──▶ 软件增益调节 ──▶ 你的 USB 音箱
-```
-
-- 通过 [usbip-win2](https://github.com/vadimgrn/usbip-win2) 驱动（安装程序中的可选项）经 USB/IP 模拟标准 USB 音箱。
-- 不改动系统音频设置，代价是约 40–60 ms 的延迟。
+- 卸载时会还原“受保护音频路径”开关（`DisableProtectedAudioDG`）和音箱原来的音效设置。
 
 ## 配置与日志
 
@@ -108,14 +91,10 @@ VolumeBridge 提供两种工作模式，可在主窗口里随时切换：
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `mode` | `"apo"` | `"apo"` 零延迟模式；`"virtual"` 兼容模式 |
 | `maxOutputDb` | `-12` | 滑块 100% 时的输出上限（dB），`0` 表示音箱原始最大音量 |
 | `outputKeywords` | `["JBL", "Zgmicro"]` | 自动识别输出设备的名称关键字（不区分大小写） |
 | `outputDeviceId` | `null` | 固定指定的输出设备 ID（由界面下拉框写入） |
 | `language` | `"auto"` | `"zh"` / `"en"`，`"auto"` 跟随安装时的语言选择 |
-| `targetBufferMs` / `outputBufferMs` | `20` / `10` | 兼容模式的音频缓冲设置（ms） |
-| `minDb` / `maxDb` / `volumeStepDb` | `-60` / `0` / `0.25` | 兼容模式向 Windows 汇报的音量范围和步长 |
-| `usbipPort` | `3240` | 兼容模式的本机 USB/IP 端口 |
 
 ## 从源码构建
 
@@ -128,8 +107,6 @@ GitHub Actions（`.github/workflows/build.yml`）会在 Windows 上构建 C++ �
 
 ## 致谢与许可
 
-- 兼容模式的 UAC1 设备与 USB/IP 服务端改写自 [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)（BSD-2-Clause）。
-- [usbip-win2](https://github.com/vadimgrn/usbip-win2)（BSD-2-Clause）作为可选项随安装包分发，未作修改。
 - [NAudio](https://github.com/naudio/NAudio)（MIT）。
 - APO 注册方式参考了 [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) 的公开行为（未复制其 GPL 代码）。
 - 第三方许可全文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。VolumeBridge 基于 [MIT 许可证](LICENSE) 开源。

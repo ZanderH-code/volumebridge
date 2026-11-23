@@ -4,6 +4,11 @@
 
 `VolumeBridgeSetup.exe.sha256` is used by the in-app updater to verify the download.
 
+### 0.4.0
+- 只保留零延迟模式：移除兼容（虚拟音箱）模式，安装包不再附带 usbip-win2 驱动，体积明显变小、界面更简单。 / Zero-latency mode only: the compatible (virtual speaker) mode is removed and usbip-win2 is no longer bundled; smaller installer, simpler window.
+- 从旧版本升级：配置自动沿用（已移除的设置会被忽略）；如果旧版本装过 usbip-win2，卸载 VolumeBridge 时仍会询问是否一并卸载。 / Upgrading keeps your settings; if an older version installed usbip-win2, uninstalling still offers to remove it.
+- 启动时自动清理以前一键更新下载的安装包（%TEMP%\VolumeBridgeUpdate）。 / Old one-click-update downloads are cleaned up at startup.
+
 ### 0.3.3
 - 修复零延迟插件从未生效的根本原因：Windows 音频引擎以 COM 聚合方式创建插件，旧版本拒绝了聚合，插件实际从未被创建（与 Equalizer APO 的实现对比后发现）。 / Root cause fix: the audio engine creates APOs aggregated; earlier versions refused aggregation, so the plugin was never created (found by comparing with Equalizer APO).
 - 音频进程只能读共享文件时，插件改为只读方式获取音量和上限。 / If audiodg may only read the shared file, the plugin still follows the app's volume and ceiling.
