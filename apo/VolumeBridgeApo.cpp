@@ -30,6 +30,7 @@ static const CLSID CLSID_VolumeBridgeApo =
 static const wchar_t* const kClsidString = L"{B2800674-8C35-428D-A3EA-750171E7DD5C}";
 
 static HMODULE g_module = nullptr;
+static void ApoLog(const wchar_t* fmt, ...);
 static std::atomic<long> g_objects{ 0 };
 static std::atomic<long> g_locks{ 0 };
 
