@@ -204,8 +204,8 @@ begin
   RegWriteDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', 1);
 end;
 
-{ Upgrades: audiodg.exe keeps VolumeBridgeApo.dll loaded; stop the audio service so it can be replaced.
-  [Run] starts it again. }
+{ Upgrades: audiodg.exe keeps VolumeBridgeApo.dll loaded; stop the audio service so it can be
+  replaced. The Run section starts it again. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
