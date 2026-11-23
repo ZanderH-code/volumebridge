@@ -38,7 +38,7 @@ static class Program
 
         if (args[0] == "--open-logs")
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{dataDir}\"") { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(dataDir) { UseShellExecute = true });
             return 0;
         }
 

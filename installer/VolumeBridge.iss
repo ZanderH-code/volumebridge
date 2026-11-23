@@ -21,6 +21,8 @@ AppPublisher=VolumeBridge
 DefaultDirName={autopf}\VolumeBridge
 DefaultGroupName=VolumeBridge
 DisableProgramGroupPage=yes
+; Fixed location: the exe decides where config/logs go by checking for Program Files (AppPaths.DataDir).
+DisableDirPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -115,9 +117,6 @@ begin
   Result := UsbipInstalledNow;
 end;
 
-var
-  UsbipRemovedNow: Boolean;
-
 { "C:\...\unins000.exe" /LOG  ->  C:\...\unins000.exe }
 function ExecutableFromCommandLine(const Cmd: String): String;
 var
@@ -143,7 +142,9 @@ begin
   end;
 end;
 
-{ Runs during usUninstall so UninstallNeedRestart (evaluated afterwards) can offer the reboot. }
+{ Optionally hands off to usbip-win2's own uninstaller (with its progress window). It is not waited
+  for: its second phase outlives the first, and it shows its own restart prompt only after the
+  driver packages are removed, so we never offer a reboot that could interrupt it. }
 procedure MaybeRemoveUsbip();
 var
   Marker: Cardinal;
@@ -152,19 +153,17 @@ var
 begin
   if not RegQueryDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', Marker) or (Marker <> 1) then
     Exit;
-  if RegQueryStringValue(HKLM64, '{#UsbipUninstallKey}', 'UninstallString', Uninstaller) then
+  if RegQueryStringValue(HKLM64, '{#UsbipUninstallKey}', 'UninstallString', Uninstaller)
+     and not UninstallSilent() then
   begin
     Exe := ExecutableFromCommandLine(Uninstaller);
     if SuppressibleMsgBox('VolumeBridge 安装时一并安装了 usbip-win2 驱动。' + #13#10 +
-        '是否也卸载它？（如果其他软件也在使用 usbip-win2，请选“否”。卸载后需要重启。）',
+        '是否也卸载它？（如果其他软件也在使用 usbip-win2，请选“否”。它的卸载程序会在完成后提示重启。）',
         mbConfirmation, MB_YESNO, IDNO) = IDYES then
     begin
-      if Exec(Exe, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', ExtractFileDir(Exe), SW_HIDE, ewWaitUntilTerminated, ResultCode)
-         and (ResultCode = 0) then
-        UsbipRemovedNow := True
-      else
-        SuppressibleMsgBox('usbip-win2 卸载失败（' + IntToStr(ResultCode) + '）。可在“设置 → 应用”中手动卸载 USBip。',
-          mbError, MB_OK, IDOK);
+      if not Exec(Exe, '/SILENT', '', SW_SHOW, ewNoWait, ResultCode) then
+        SuppressibleMsgBox('无法启动 usbip-win2 卸载程序（' + SysErrorMessage(ResultCode) + '）。' + #13#10 +
+          '可在“设置 → 应用”中手动卸载 USBip。', mbError, MB_OK, IDOK);
     end;
   end;
   RegDeleteKeyIncludingSubkeys(HKLM64, '{#MarkerKey}');
@@ -174,9 +173,4 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
     MaybeRemoveUsbip();
-end;
-
-function UninstallNeedRestart(): Boolean;
-begin
-  Result := UsbipRemovedNow;
 end;
