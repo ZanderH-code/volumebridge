@@ -179,7 +179,6 @@ sealed class TrayApp : ApplicationContext
     {
         var ct = _quit.Token;
         button.Enabled = false;
-        string original = button.Text;
         bool Gone() => Quitting || button.IsDisposed;
         try
         {
@@ -246,7 +245,7 @@ sealed class TrayApp : ApplicationContext
         {
             if (!Gone())
             {
-                button.Text = original;
+                button.Text = T("检查更新", "Check for updates"); // current language, even if switched meanwhile
                 button.Enabled = true;
             }
         }

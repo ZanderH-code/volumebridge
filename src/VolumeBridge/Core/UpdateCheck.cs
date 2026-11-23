@@ -75,7 +75,7 @@ public static class UpdateCheck
     public static async Task<string> DownloadVerifiedAsync(HttpClient http, ReleaseInfo r, string dir, IProgress<double>? progress, CancellationToken ct)
     {
         string expected = ParseChecksum(await http.GetStringAsync(r.ChecksumUrl, ct))
-            ?? throw new InvalidDataException("发布页上的校验文件格式不正确");
+            ?? throw new InvalidDataException(Loc.T("发布页上的校验文件格式不正确", "The checksum file on the release page is malformed"));
 
         Directory.CreateDirectory(dir);
         string path = Path.Combine(dir, $"VolumeBridgeSetup-{r.Version}.exe");
@@ -101,7 +101,7 @@ public static class UpdateCheck
         if (actual != expected)
         {
             File.Delete(path);
-            throw new InvalidDataException("下载的安装包校验失败，已删除");
+            throw new InvalidDataException(Loc.T("下载的安装包校验失败，已删除", "The downloaded installer failed verification and was deleted"));
         }
         return path;
     }
