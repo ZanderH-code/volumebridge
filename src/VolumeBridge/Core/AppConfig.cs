@@ -42,6 +42,12 @@ public sealed class AppConfig
     public string? UsbipPath { get; set; }
     public int SmoothingMs { get; set; } = 20;
 
+    /// <summary>Output at 100 % slider, in dB (0 = the speaker's full level). Keeps a fixed-max speaker sane.</summary>
+    public double MaxOutputDb { get; set; } = -12;
+
+    /// <summary>Linear factor for <see cref="MaxOutputDb"/>, limited to -60..0 dB.</summary>
+    public float OutputCapGain => (float)Math.Pow(10, Math.Clamp(MaxOutputDb, -60, 0) / 20.0);
+
     /// <summary>"apo" = zero latency (effect plugin on the speaker itself); "virtual" = USB/IP virtual speaker.</summary>
     public string Mode { get; set; } = "apo";
 

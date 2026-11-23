@@ -26,6 +26,9 @@ sealed class MainForm : Form
     readonly Label _modeCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
     readonly Button _enableApo = new() { AutoSize = true };
+    readonly Label _capCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+    readonly NumericUpDown _cap = new() { Minimum = -30, Maximum = 0, Increment = 1, Width = 60 };
+    readonly Label _capUnit = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly Label _languageCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _language = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
     readonly Label _stats = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Consolas", 9f) };
@@ -71,6 +74,7 @@ sealed class MainForm : Form
         root.Controls.Add(Row(_modeCaption, _mode));
         root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault, _enableApo));
         root.Controls.Add(Row(_outputCaption, _outputs));
+        root.Controls.Add(Row(_capCaption, _cap, _capUnit));
         root.Controls.Add(Spacer());
         root.Controls.Add(_stats);
         root.Controls.Add(Spacer());
@@ -84,6 +88,8 @@ sealed class MainForm : Form
         _language.SelectedIndex = Current == UiLanguage.Chinese ? 0 : 1;
         _language.SelectedIndexChanged += (_, _) => _app.SetLanguage(_language.SelectedIndex == 0 ? UiLanguage.Chinese : UiLanguage.English);
 
+        _cap.Value = (decimal)Math.Clamp(Math.Round(_app.Config.MaxOutputDb), -30, 0);
+        _cap.ValueChanged += (_, _) => _app.SetMaxOutputDb((double)_cap.Value);
         _mode.SelectedIndexChanged += (_, _) => ModeChosen();
         _enableApo.Click += async (_, _) => await EnableApo();
         _enableApo.Visible = false;
@@ -104,6 +110,8 @@ sealed class MainForm : Form
     public void ApplyTexts()
     {
         _modeCaption.Text = T("模式：", "Mode:");
+        _capCaption.Text = T("最大音量（滑块 100% 时）：", "Maximum volume (slider at 100%):");
+        _capUnit.Text = T("dB（0 = 音箱原始最大音量）", "dB (0 = the speaker's own full level)");
         _settingMode = true;
         _mode.Items.Clear();
         _mode.Items.AddRange([T("零延迟（音效插件，推荐）", "Zero latency (effect plugin, recommended)"),

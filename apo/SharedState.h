@@ -37,5 +37,7 @@ struct VbShared
     uint32_t apoNotifications; // count of endpoint-volume notifications received
     int32_t  apoLastError;     // last HRESULT worth reporting (0 = none)
     uint32_t apoPid;           // audiodg process that owns apoInstances
+    float    appCapGain;       // written by the app: output ceiling (linear), applied on top of the slider
+    uint32_t appCapSet;        // 1 once appCapGain is valid
 };
 #pragma pack(pop)

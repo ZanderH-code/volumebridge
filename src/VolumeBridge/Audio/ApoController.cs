@@ -66,7 +66,14 @@ public sealed class ApoController : IDisposable
 
     public AppConfig Config => _config;
 
-    public void Start() => _thread.Start();
+    public void Start()
+    {
+        ApplyCap();
+        _thread.Start();
+    }
+
+    /// <summary>Publishes the configured output ceiling to the plugin.</summary>
+    public void ApplyCap() => _shared?.WriteCap(_config.OutputCapGain);
 
     /// <summary>Re-reads the output selection right away.</summary>
     public void Recheck() => _recheck.Set();

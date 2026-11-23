@@ -138,6 +138,15 @@ sealed class TrayApp : ApplicationContext
         }
     }
 
+    /// <summary>Saves and applies a new output ceiling.</summary>
+    public void SetMaxOutputDb(double db)
+    {
+        Config.MaxOutputDb = db;
+        SaveConfig();
+        Engine?.ApplyCap();
+        Apo?.ApplyCap();
+    }
+
     /// <summary>Re-reads the output selection (after the drop-down changed).</summary>
     public void ReopenOutput()
     {

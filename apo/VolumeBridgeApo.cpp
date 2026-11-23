@@ -20,6 +20,8 @@
 #include <BaseAudioProcessingObject.h>
 #include <shlobj.h>
 #include <strsafe.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include "SharedState.h"
 
 // {B2800674-8C35-428D-A3EA-750171E7DD5C}
@@ -46,8 +48,9 @@ static VbShared* OpenShared()
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)) &&
             SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\VolumeBridge\\apo.dat")))
         {
-            HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                       nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) ApoLog(L"shared file open failed: %ls error=%lu", path, GetLastError());
             if (file != INVALID_HANDLE_VALUE)
             {
                 HANDLE map = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, VB_SHARED_SIZE, nullptr);
@@ -67,6 +70,7 @@ static VbShared* OpenShared()
                             InterlockedExchange(reinterpret_cast<volatile LONG*>(&s->magic), static_cast<LONG>(VB_SHARED_MAGIC));
                         }
                         g_shared = s; // kept mapped for the life of the process
+                        ApoLog(L"shared state mapped");
                     }
                 }
             }
@@ -75,6 +79,47 @@ static VbShared* OpenShared()
     VbShared* result = g_shared;
     ReleaseSRWLockExclusive(&g_sharedLock);
     return result;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Diagnostic log (non-real-time paths only): %ProgramData%\VolumeBridge\apo-log.txt, else %TEMP%.
+// ---------------------------------------------------------------------------------------------
+static SRWLOCK g_logLock = SRWLOCK_INIT;
+
+static void ApoLog(const wchar_t* fmt, ...)
+{
+    wchar_t msg[512];
+    va_list args;
+    va_start(args, fmt);
+    StringCchVPrintfW(msg, 512, fmt, args);
+    va_end(args);
+
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char line[1024];
+    int n = sprintf_s(line, "%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu %ls\r\n", t.wYear, t.wMonth, t.wDay,
+                      t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId(), msg);
+    if (n <= 0) return;
+
+    AcquireSRWLockExclusive(&g_logLock);
+    wchar_t path[MAX_PATH];
+    HANDLE f = INVALID_HANDLE_VALUE;
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)) &&
+        SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\VolumeBridge\\apo-log.txt")))
+        f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE && GetTempPathW(MAX_PATH, path) > 0 && SUCCEEDED(StringCchCatW(path, MAX_PATH, L"VolumeBridge-apo-log.txt")))
+        f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE)
+    {
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(f, &size) && size.QuadPart < 1024 * 1024) // stop at 1 MB
+        {
+            DWORD written;
+            WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
+        }
+        CloseHandle(f);
+    }
+    ReleaseSRWLockExclusive(&g_logLock);
 }
 
 static float ReadFloat(volatile float* p)
@@ -154,11 +199,13 @@ public:
 
     STDMETHODIMP Initialize(UINT32 cbDataSize, BYTE* pbyData) override
     {
+        const UINT32 cbSize = (pbyData != nullptr && cbDataSize >= sizeof(APOInitBaseStruct))
+            ? reinterpret_cast<APOInitBaseStruct*>(pbyData)->cbSize : 0;
+        ApoLog(L"Initialize cbDataSize=%u cbSize=%u (v1=%u v2=%u v3=%u)", cbDataSize, cbSize,
+               static_cast<UINT32>(sizeof(APOInitSystemEffects)), static_cast<UINT32>(sizeof(APOInitSystemEffects2)),
+               static_cast<UINT32>(sizeof(APOInitSystemEffects3)));
         if ((pbyData == nullptr) != (cbDataSize == 0)) return E_INVALIDARG;
         if (m_bIsInitialized) return APOERR_ALREADY_INITIALIZED;
-        if (pbyData != nullptr &&
-            (cbDataSize < sizeof(APOInitBaseStruct) || reinterpret_cast<APOInitBaseStruct*>(pbyData)->cbSize != cbDataSize))
-            return E_INVALIDARG;
 
         // The structures differ in layout (v3 replaced two pointers with one), so match sizes exactly.
         IMMDeviceCollection* devices = nullptr;
@@ -182,10 +229,8 @@ public:
         {
             kind = 1;
         }
-        else if (cbDataSize != 0)
-        {
-            return E_INVALIDARG;
-        }
+        // Any other size (e.g. a newer structure on a newer Windows): process audio anyway, without
+        // reading fields whose layout we do not know. The tray app then provides the volume.
 
         if (devices != nullptr)
         {
@@ -196,10 +241,11 @@ public:
 
         // Discovery-only instances (e.g. created by Settings to list effects) never process audio:
         // keep them away from the shared state the running instance reports through.
+        ApoLog(L"Initialize kind=%u discoveryOnly=%d endpoint=%d", kind, discoveryOnly ? 1 : 0, m_endpoint != nullptr ? 1 : 0);
         if (!discoveryOnly)
         {
             m_shared = OpenShared();
-            if (m_shared != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInitKind), static_cast<LONG>(kind));
+            if (m_shared != nullptr) InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInitKind), static_cast<LONG>(kind == 0 ? 9 : kind));
         }
 
         m_bIsInitialized = true;
@@ -210,6 +256,7 @@ public:
                                 UINT32 nOut, APO_CONNECTION_DESCRIPTOR** ppOut) override
     {
         HRESULT hr = CBaseAudioProcessingObject::LockForProcess(nIn, ppIn, nOut, ppOut);
+        ApoLog(L"LockForProcess in=%u out=%u hr=0x%08X channels=%u", nIn, nOut, static_cast<unsigned>(hr), m_u32SamplesPerFrame);
         if (FAILED(hr)) return hr;
 
         UNCOMPRESSEDAUDIOFORMAT fmt{};
@@ -240,6 +287,7 @@ public:
 
     STDMETHODIMP UnlockForProcess() override
     {
+        ApoLog(L"UnlockForProcess");
         if (m_counted && m_shared != nullptr)
         {
             AcquireSRWLockExclusive(&g_sharedLock);
@@ -326,6 +374,7 @@ public:
         if (apoNotifications == nullptr || count == nullptr) return E_POINTER;
         *apoNotifications = nullptr;
         *count = 0;
+        ApoLog(L"GetApoNotificationRegistrationInfo endpoint=%d", m_endpoint != nullptr ? 1 : 0);
         if (m_endpoint == nullptr) return S_OK;
         auto* d = static_cast<APO_NOTIFICATION_DESCRIPTOR*>(CoTaskMemAlloc(sizeof(APO_NOTIFICATION_DESCRIPTOR)));
         if (d == nullptr) return E_OUTOFMEMORY;
@@ -345,7 +394,8 @@ public:
         const float master = n->audioEndpointVolumeChange.volume->fMasterVolume;
         const bool muted = n->audioEndpointVolumeChange.volume->bMuted != FALSE;
         WriteFloat(&m_notifGain, GainFromSlider(master, muted));
-        m_haveNotif.store(true, std::memory_order_release);
+        if (!m_haveNotif.exchange(true, std::memory_order_acq_rel))
+            ApoLog(L"first volume notification: master=%.3f muted=%d", master, muted ? 1 : 0);
         if (m_shared != nullptr)
         {
             WriteFloat(&m_shared->apoMasterVolume, master);
@@ -383,6 +433,12 @@ private:
         }
         if (!(gain >= 0.0f)) gain = 1.0f;
         if (gain > 1.0f) gain = 1.0f;
+        // Output ceiling set in the app (persisted in the shared file, so it applies without the app too).
+        if (m_shared != nullptr && m_shared->appCapSet != 0)
+        {
+            float cap = ReadFloat(&m_shared->appCapGain);
+            if (cap >= 0.0f && cap <= 1.0f) gain *= cap;
+        }
         if (m_shared != nullptr && m_shared->apoSource != source)
             InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoSource), static_cast<LONG>(source));
         return gain;

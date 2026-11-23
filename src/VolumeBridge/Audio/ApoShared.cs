@@ -17,7 +17,8 @@ public sealed class ApoShared : IDisposable
     public const uint Magic = 0x31474256; // "VBG1"
     const int Size = 4096;
     const int OMagic = 0, OVersion = 4, OAppGain = 8, OAppSeq = 12, OInstances = 16, OSource = 20, OTargetGain = 24,
-        OInitKind = 28, OHeartbeat = 32, ORate = 40, OChannels = 44, OMaster = 48, OMuted = 52, ONotifs = 56;
+        OInitKind = 28, OHeartbeat = 32, ORate = 40, OChannels = 44, OMaster = 48, OMuted = 52, ONotifs = 56,
+        OCapGain = 68, OCapSet = 72;
 
     readonly MemoryMappedFile _map;
     readonly MemoryMappedViewAccessor _view;
@@ -48,6 +49,13 @@ public sealed class ApoShared : IDisposable
         _view.Write(OAppGain, Math.Clamp(gain, 0f, 1f));
         _seq = _seq == uint.MaxValue ? 1 : _seq + 1;
         _view.Write(OAppSeq, _seq);
+    }
+
+    /// <summary>Output ceiling (linear) the APO multiplies on top of the slider; persists in the file.</summary>
+    public void WriteCap(float capGain)
+    {
+        _view.Write(OCapGain, Math.Clamp(capGain, 0f, 1f));
+        _view.Write(OCapSet, 1u);
     }
 
     public ApoReport Read()

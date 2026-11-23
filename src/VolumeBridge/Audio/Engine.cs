@@ -86,11 +86,11 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         _device = new SpeakerDevice(range);
         _bridge = new AudioBridge(Math.Clamp(Config.TargetBufferMs, 5, 200), Math.Clamp(Config.SmoothingMs, 1, 200));
         var (v0, m0) = _device.VolumeState;
-        _bridge.TargetGain = (float)SpeakerDevice.Gain(v0, m0);
+        _bridge.TargetGain = (float)SpeakerDevice.Gain(v0, m0) * Config.OutputCapGain;
         var bridge = _bridge;
         _device.VolumeChanged += (vol, mute) =>
         {
-            bridge.TargetGain = (float)SpeakerDevice.Gain(vol, mute);
+            bridge.TargetGain = (float)SpeakerDevice.Gain(vol, mute) * Config.OutputCapGain;
             log(string.Create(CultureInfo.InvariantCulture,
                 $"VOLUME from Windows: {(vol == SpeakerDevice.VolumeSilence ? "-inf" : (vol / 256.0).ToString("0.00", CultureInfo.InvariantCulture))} dB mute={(mute ? 1 : 0)}"));
         };
@@ -156,6 +156,21 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         _highRes = null;
         _bridge = null;
         _device = null;
+    }
+
+    /// <summary>Re-applies the output ceiling after a settings change.</summary>
+    public void ApplyCap()
+    {
+        if (!Monitor.TryEnter(_gate)) return;
+        try
+        {
+            if (_device is not null && _bridge is not null)
+            {
+                var (v, m) = _device.VolumeState;
+                _bridge.TargetGain = (float)SpeakerDevice.Gain(v, m) * Config.OutputCapGain;
+            }
+        }
+        finally { Monitor.Exit(_gate); }
     }
 
     /// <summary>Re-reads output selection from <see cref="Config"/> and reopens the output device.
