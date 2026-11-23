@@ -47,6 +47,7 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
     AudioBridge? _bridge;
     SpeakerOutput? _output;
     string? _startError;
+    bool _disposed;
 
     public AppConfig Config { get; } = config;
 
@@ -55,6 +56,7 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
     {
         lock (_gate)
         {
+            if (_disposed) return false;
             if (_server is not null) return true;
             _startError = null;
             try
@@ -62,10 +64,10 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
                 StartCore();
                 return true;
             }
-            catch (EngineStartException e)
+            catch (Exception e)
             {
-                _startError = e.Message;
-                log("START FAILED: " + e.Message);
+                _startError = e is EngineStartException ? e.Message : Loc.T($"启动失败：{e.Message}", $"Start failed: {e.Message}");
+                log("START FAILED: " + e);
                 StopCore();
                 return false;
             }
@@ -75,7 +77,9 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
     void StartCore()
     {
         string exe = UsbipCli.Locate(Config.UsbipPath)
-            ?? throw new EngineStartException("找不到 usbip-win2（usbip.exe）。请重新运行 VolumeBridge 安装包。");
+            ?? throw new EngineStartException(Loc.T(
+                "找不到 usbip-win2（usbip.exe）。请重新运行 VolumeBridge 安装包。",
+                "usbip-win2 (usbip.exe) not found. Please run the VolumeBridge installer again."));
         _cli = new UsbipCli(exe, log);
 
         var range = VolumeRange.FromDb(Config.MinDb, Config.MaxDb, Config.VolumeStepDb);
@@ -103,7 +107,9 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         try { _server.Start(); }
         catch (Exception e)
         {
-            throw new EngineStartException($"无法监听本机端口 {Config.UsbipPort}（{e.Message}）。可能有其他 USB/IP 程序（如 Virtual Cables）占用，可在 config.json 修改 usbipPort。");
+            throw new EngineStartException(Loc.T(
+                $"无法监听本机端口 {Config.UsbipPort}（{e.Message}）。可能有其他 USB/IP 程序（如 Virtual Cables）占用，可在 config.json 修改 usbipPort。",
+                $"Cannot listen on local port {Config.UsbipPort} ({e.Message}). Another USB/IP program (e.g. Virtual Cables) may use it; change usbipPort in config.json."));
         }
         log(string.Create(CultureInfo.InvariantCulture,
             $"USB/IP server on 127.0.0.1:{_server.Port}; volume range {range.Min / 256.0:0.##}..{range.Max / 256.0:0.##} dB, step {range.Res / 256.0:0.###} dB"));
@@ -115,7 +121,9 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         }
         catch (Exception e)
         {
-            throw new EngineStartException($"虚拟音箱接入失败：{e.Message}。如果刚安装完驱动，请重启电脑后再试。");
+            throw new EngineStartException(Loc.T(
+                $"虚拟音箱接入失败：{e.Message}。如果刚安装完驱动，请重启电脑后再试。",
+                $"Could not attach the virtual speaker: {e.Message}. If the driver was just installed, restart Windows and try again."));
         }
         log($"Attached as usbip port {_vhciPort}.");
 
@@ -150,14 +158,17 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
         _device = null;
     }
 
-    /// <summary>Re-reads output selection from <see cref="Config"/> and reopens the output device.</summary>
+    /// <summary>Re-reads output selection from <see cref="Config"/> and reopens the output device.
+    /// Non-blocking: while Start is still running, the output will read the new config when it opens.</summary>
     public void ReopenOutput()
     {
-        lock (_gate) _output?.Reopen();
+        if (!Monitor.TryEnter(_gate)) return;
+        try { _output?.Reopen(); }
+        finally { Monitor.Exit(_gate); }
     }
 
-    static readonly EngineStatus Starting = new(false, null, false, false, 0, false,
-        double.NegativeInfinity, double.NegativeInfinity, false, "启动中", 0, 0, 0, 0, 0, 0);
+    static EngineStatus Starting => new(false, null, false, false, 0, false,
+        double.NegativeInfinity, double.NegativeInfinity, false, Loc.T("启动中", "Starting"), 0, 0, 0, 0, 0, 0);
 
     /// <summary>Never blocks: while Start/Stop holds the lock (attach can take seconds) it reports "starting".</summary>
     public EngineStatus GetStatus()
@@ -177,7 +188,7 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
                 InRmsDb: rms,
                 InPeakDb: peak,
                 OutputOpen: _bridge?.OutputActive ?? false,
-                OutputText: _output?.Status ?? "未运行",
+                OutputText: _output?.Status ?? Loc.T("未运行", "Not running"),
                 BufferMs: _bridge?.FillMs ?? 0,
                 DeviceMs: _output?.PaddingMs ?? 0,
                 DriftPpm: _bridge?.Drift.Ppm ?? 0,
@@ -197,7 +208,14 @@ public sealed class Engine(AppConfig config, Action<string> log) : IDisposable
     static string Db(double db) =>
         double.IsNegativeInfinity(db) ? "-inf" : db.ToString("0.0", CultureInfo.InvariantCulture);
 
-    public void Dispose() => Stop();
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _disposed = true;
+            StopCore();
+        }
+    }
 }
 
 public sealed class EngineStartException(string message) : Exception(message);

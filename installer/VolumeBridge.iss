@@ -35,9 +35,37 @@ WizardStyle=modern
 ; A running VolumeBridge is handled in InitializeSetup/InitializeUninstall (wait for it to exit),
 ; not with AppMutex, so one-click updates (silent) do not abort while the app is shutting down.
 UninstallDisplayName=VolumeBridge
+; Language dialog (English / 简体中文); silent updates reuse the previous choice.
+ShowLanguageDialog=yes
+UsePreviousLanguage=yes
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Messages]
-WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs usbip-win2 {#UsbipVersion} (signed virtual USB host driver) if needed.%n%n安装驱动时，所有 USB 3.0 Hub 会重启，USB 设备（包括音箱、键盘、鼠标）会短暂断开几秒，属于正常现象。
+english.WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs usbip-win2 {#UsbipVersion} (a signed virtual USB host driver) if needed. While the driver installs, USB 3.0 hubs restart and USB devices (speaker, keyboard, mouse) disconnect for a few seconds. This is expected.
+chinesesimplified.WelcomeLabel2=将安装 VolumeBridge {#AppVersion}。%n%n如有需要，还会安装 usbip-win2 {#UsbipVersion}（已签名的虚拟 USB 主控驱动）。安装驱动时，所有 USB 3.0 Hub 会重启，USB 设备（包括音箱、键盘、鼠标）会短暂断开几秒，属于正常现象。
+
+[CustomMessages]
+english.StartApp=Start VolumeBridge now
+chinesesimplified.StartApp=立即启动 VolumeBridge
+english.AppRunning=VolumeBridge is running. Right-click its tray icon, choose "Quit", then click Retry.
+chinesesimplified.AppRunning=VolumeBridge 正在运行。请右键托盘图标选择“退出”，然后点“重试”。
+english.InstallingUsbip=Installing usbip-win2 {#UsbipVersion} (USB devices will briefly disconnect)...
+chinesesimplified.InstallingUsbip=正在安装 usbip-win2 {#UsbipVersion}（USB 设备会短暂断开）……
+english.UsbipFailed=usbip-win2 could not be installed: %1%n%nVolumeBridge is installed, but the virtual speaker needs usbip-win2. Please report this with a screenshot.
+chinesesimplified.UsbipFailed=usbip-win2 未能安装：%1%n%nVolumeBridge 已安装，但虚拟音箱需要 usbip-win2 才能工作。请截图告知开发者。
+english.UsbipCannotStart=its installer could not be started (%1)
+chinesesimplified.UsbipCannotStart=无法启动安装程序（%1）
+english.UsbipExitCode=exit code %1. Code 1 may mean the driver requires test signing.
+chinesesimplified.UsbipExitCode=退出码 %1。若为 1，可能是该驱动要求开启测试签名。
+english.UsbipVersionMismatch=the installer finished, but the installed version is still not {#UsbipVersion} (found: %1).
+chinesesimplified.UsbipVersionMismatch=安装程序已结束，但检测到的版本仍不是 {#UsbipVersion}（当前：%1）。
+english.RemoveUsbipAsk=VolumeBridge installed the usbip-win2 driver. Remove it too?%n%n(Choose No if other software uses usbip-win2. Its uninstaller asks for a restart when done.)
+chinesesimplified.RemoveUsbipAsk=VolumeBridge 安装时一并安装了 usbip-win2 驱动。是否也卸载它？%n%n（如果其他软件也在使用 usbip-win2，请选“否”。它的卸载程序会在完成后提示重启。）
+english.RemoveUsbipFailed=Could not start the usbip-win2 uninstaller (%1). You can remove "USBip" in Settings → Apps.
+chinesesimplified.RemoveUsbipFailed=无法启动 usbip-win2 卸载程序（%1）。可在“设置 → 应用”中手动卸载 USBip。
 
 [Files]
 Source: "{#PayloadDir}\VolumeBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -48,12 +76,15 @@ Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinsta
 
 [Icons]
 Name: "{group}\VolumeBridge"; Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"
-Name: "{group}\卸载 VolumeBridge"; Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallProgram,VolumeBridge}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"; Description: "立即启动 VolumeBridge"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\VolumeBridge.exe"; WorkingDir: "{app}"; Description: "{cm:StartApp}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 ; One-click update from the app runs this installer with /SILENT; reopen the app afterwards.
 Filename: "{app}\VolumeBridge.exe"; Parameters: "--updated"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: WizardSilent
+
+[UninstallDelete]
+Type: files; Name: "{app}\language.txt"
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN VolumeBridge /F"; Flags: runhidden; RunOnceId: "DeleteAutostartTask"
@@ -64,6 +95,8 @@ var
 
 const
   RunningMutex = 'Global\VolumeBridge.Running';
+  { Tells the app (waiting after starting this installer) that UAC was accepted, so it can quit. }
+  UpdatingMutex = 'Global\VolumeBridge.Updating';
 
 { Waits up to TimeoutMs for a running VolumeBridge to exit; interactive runs may retry. }
 function WaitForAppExit(TimeoutMs: Integer; Silent: Boolean): Boolean;
@@ -80,11 +113,13 @@ begin
     Result := not CheckForMutexes(RunningMutex);
     if Result or Silent then
       Exit;
-  until MsgBox('VolumeBridge 正在运行。请右键托盘图标选择“退出”，然后点“重试”。', mbError, MB_RETRYCANCEL) <> IDRETRY;
+  until MsgBox(CustomMessage('AppRunning'), mbError, MB_RETRYCANCEL) <> IDRETRY;
 end;
 
 function InitializeSetup(): Boolean;
 begin
+  { Runs in the elevated setup process, i.e. after UAC was accepted. }
+  CreateMutex(UpdatingMutex);
   { Silent = one-click update: the app is exiting by itself, give it time. Interactive: ask quickly. }
   if WizardSilent() then
     Result := WaitForAppExit(30000, True)
@@ -118,35 +153,47 @@ end;
 
 procedure UsbipFailed(const Msg: String);
 begin
-  SuppressibleMsgBox('usbip-win2 未能安装：' + Msg + #13#10#13#10 +
-    'VolumeBridge 已安装，但虚拟音箱需要 usbip-win2 才能工作。请截图告知开发者。',
-    mbCriticalError, MB_OK, IDOK);
+  SuppressibleMsgBox(FmtMessage(CustomMessage('UsbipFailed'), [Msg]), mbCriticalError, MB_OK, IDOK);
 end;
 
 procedure InstallUsbip();
 var
   ResultCode: Integer;
 begin
-  WizardForm.StatusLabel.Caption := 'Installing usbip-win2 {#UsbipVersion} (USB devices will briefly disconnect)...';
+  WizardForm.StatusLabel.Caption := CustomMessage('InstallingUsbip');
   if not Exec(ExpandConstant('{tmp}\{#UsbipSetup}'),
       '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /COMPONENTS="main,client"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
-    UsbipFailed('无法启动安装程序（' + SysErrorMessage(ResultCode) + '）');
+    UsbipFailed(FmtMessage(CustomMessage('UsbipCannotStart'), [SysErrorMessage(ResultCode)]));
     Exit;
   end;
   if ResultCode <> 0 then
   begin
-    UsbipFailed('退出码 ' + IntToStr(ResultCode) + '。若为 1，可能是该驱动要求开启测试签名。');
+    UsbipFailed(FmtMessage(CustomMessage('UsbipExitCode'), [IntToStr(ResultCode)]));
     Exit;
   end;
   if UsbipNeeded() then
   begin
-    UsbipFailed('安装程序已结束，但检测到的版本仍不是 {#UsbipVersion}（当前：' + InstalledUsbipVersion() + '）。');
+    UsbipFailed(FmtMessage(CustomMessage('UsbipVersionMismatch'), [InstalledUsbipVersion()]));
     Exit;
   end;
   UsbipInstalledNow := True;
   RegWriteDWordValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip', 1);
+end;
+
+{ The app's UI follows the installer language unless the user picks another one in the app. }
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Lang: String;
+begin
+  if CurStep <> ssPostInstall then
+    Exit;
+  if ActiveLanguage() = 'chinesesimplified' then
+    Lang := 'zh'
+  else
+    Lang := 'en';
+  SaveStringToFile(ExpandConstant('{app}\language.txt'), Lang, False);
 end;
 
 { usbip-win2 asks for a reboot (AlwaysRestart=yes); offer it, but the user may test first. }
@@ -195,13 +242,10 @@ begin
      and not UninstallSilent() then
   begin
     Exe := ExecutableFromCommandLine(Uninstaller);
-    if SuppressibleMsgBox('VolumeBridge 安装时一并安装了 usbip-win2 驱动。' + #13#10 +
-        '是否也卸载它？（如果其他软件也在使用 usbip-win2，请选“否”。它的卸载程序会在完成后提示重启。）',
-        mbConfirmation, MB_YESNO, IDNO) = IDYES then
+    if SuppressibleMsgBox(CustomMessage('RemoveUsbipAsk'), mbConfirmation, MB_YESNO, IDNO) = IDYES then
     begin
       if not Exec(Exe, '/SILENT', '', SW_SHOW, ewNoWait, ResultCode) then
-        SuppressibleMsgBox('无法启动 usbip-win2 卸载程序（' + SysErrorMessage(ResultCode) + '）。' + #13#10 +
-          '可在“设置 → 应用”中手动卸载 USBip。', mbError, MB_OK, IDOK);
+        SuppressibleMsgBox(FmtMessage(CustomMessage('RemoveUsbipFailed'), [SysErrorMessage(ResultCode)]), mbError, MB_OK, IDOK);
     end;
   end;
   RegDeleteKeyIncludingSubkeys(HKLM64, '{#MarkerKey}');

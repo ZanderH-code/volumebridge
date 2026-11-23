@@ -18,7 +18,7 @@ Apps ──▶ "VolumeBridge Speaker" (a USB speaker emulated by VolumeBridge; s
 - VolumeBridge emulates a standard USB Audio Class 1.0 device (48 kHz / 16-bit / stereo) over USB/IP, and Windows' built-in USB audio driver picks it up. The device declares a hardware volume control, so Windows passes the volume to VolumeBridge instead of turning the sound down itself. **The volume is never applied twice.**
 - The virtual USB host comes from [usbip-win2](https://github.com/vadimgrn/usbip-win2), a signed open-source driver that the installer sets up for you. VolumeBridge ships no driver of its own.
 - **Quality:** when the speaker runs at 48 kHz, samples pass through unchanged apart from the gain. Small clock differences between the two devices are absorbed by trimming the virtual speaker's clock, never by resampling. For other output rates a 64-tap Kaiser-windowed sinc resampler is used (≈80 dB stopband).
-- **Latency:** VolumeBridge's own buffer is about 20 ms by default. Including Windows and USB, expect roughly 30–50 ms in total, against the 150–250 ms that is typical for Bluetooth audio.
+- **Latency:** VolumeBridge's own buffer is about 20 ms by default. Including Windows and USB, expect roughly 40–60 ms in total, against the 150–250 ms that is typical for Bluetooth audio. Lower-latency modes are planned (see the roadmap below).
 
 ## Compatibility
 
@@ -29,17 +29,17 @@ Apps ──▶ "VolumeBridge Speaker" (a USB speaker emulated by VolumeBridge; s
 
 ## Install and use
 
-1. Download `VolumeBridgeSetup.exe` from [Releases](../../releases/latest) and run it.
+1. Download `VolumeBridgeSetup.exe` from [Releases](https://github.com/ZanderH-code/volumebridge/releases/latest) and run it.
    - It installs the usbip-win2 driver; USB devices drop out for a few seconds while it does, which is expected.
    - If it asks for a restart, you can try without restarting first.
 2. **Quit Voicemeeter.** It holds the speaker exclusively, so the two cannot run at the same time.
-3. Open VolumeBridge and click **"设为默认输出"** (Set as default output).
-4. Tick **"开机自动启动"** (Start at logon). Closing the window keeps VolumeBridge running in the tray; right-click the tray icon to quit.
-5. **"检查更新"** (Check for updates) downloads the latest release, verifies its SHA-256 and installs it. This needs one administrator confirmation.
+3. Open VolumeBridge and click **Set as default output**.
+4. Tick **Start at logon**. Closing the window keeps VolumeBridge running in the tray; right-click the tray icon to quit.
+5. **Check for updates** downloads the latest release, verifies its SHA-256 and installs it. This needs one administrator confirmation.
 
-The user interface is in Chinese for now.
+The installer asks for English or 简体中文; the app follows that choice and can be switched in its window.
 
-Config and logs live in `%LOCALAPPDATA%\VolumeBridge` ("打开日志文件夹" in the window opens it). Settings in `config.json`:
+Config and logs live in `%LOCALAPPDATA%\VolumeBridge` (**Open log folder** in the window opens it). Settings in `config.json`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -50,6 +50,13 @@ Config and logs live in `%LOCALAPPDATA%\VolumeBridge` ("打开日志文件夹" i
 | `minDb` / `maxDb` / `volumeStepDb` | -60 / 0 / 0.25 | Volume range and step offered to Windows |
 | `smoothingMs` | 20 | Gain ramp length |
 | `usbipPort` | 3240 | Local USB/IP port |
+| `language` | `auto` | `zh` / `en`; `auto` = installer choice, else Windows language |
+
+## Roadmap
+
+- WASAPI exclusive-mode output to the speaker (lower latency, bit-exact 16-bit).
+- Smaller input buffer that grows automatically only when needed.
+- Virtual speaker as a USB Audio 2.0 high-speed device (1 ms packets, feedback-endpoint clocking).
 
 ## Limitations
 

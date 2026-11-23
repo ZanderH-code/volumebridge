@@ -160,3 +160,17 @@ public class FileLogTests
         Directory.Delete(dir, true);
     }
 }
+
+public class LocTests
+{
+    static readonly System.Globalization.CultureInfo Zh = new("zh-CN"), En = new("en-US"), De = new("de-DE");
+
+    [Fact]
+    public void ConfigWins_ThenInstallerChoice_ThenWindowsLanguage()
+    {
+        Assert.Equal(UiLanguage.English, Loc.Resolve("en", "zh", Zh));
+        Assert.Equal(UiLanguage.Chinese, Loc.Resolve("auto", "zh", En));
+        Assert.Equal(UiLanguage.Chinese, Loc.Resolve(null, null, Zh));
+        Assert.Equal(UiLanguage.English, Loc.Resolve("auto", "", De));
+    }
+}

@@ -1,11 +1,13 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 
 namespace VolumeBridge.Ui;
 
 /// <summary>Speaker glyph drawn at runtime (no binary assets in the repo).</summary>
-static class AppIcon
+static partial class AppIcon
 {
+    /// <summary>Returns an Icon that owns its handle (safe to Dispose).</summary>
     public static Icon Create(int size, bool ok)
     {
         using var bmp = new Bitmap(size, size);
@@ -24,6 +26,16 @@ static class AppIcon
             g.DrawArc(pen, 15 * s, 11 * s, 7 * s, 10 * s, -50, 100);
             g.DrawArc(pen, 15 * s, 7.5f * s, 11 * s, 17 * s, -50, 100);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+        IntPtr h = bmp.GetHicon();
+        try
+        {
+            using var borrowed = Icon.FromHandle(h);
+            return (Icon)borrowed.Clone(); // the clone owns its own handle
+        }
+        finally { DestroyIcon(h); }
     }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DestroyIcon(IntPtr handle);
 }

@@ -9,6 +9,7 @@ public sealed class FileLog : IDisposable
     readonly long _maxBytes;
     readonly object _gate = new();
     StreamWriter _writer;
+    bool _disposed;
 
     public FileLog(string path, long maxBytes = 2 * 1024 * 1024)
     {
@@ -31,6 +32,7 @@ public sealed class FileLog : IDisposable
         string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}";
         lock (_gate)
         {
+            if (_disposed) return; // late messages from background threads during shutdown
             try
             {
                 if (_writer.BaseStream.Length > _maxBytes)
@@ -49,6 +51,10 @@ public sealed class FileLog : IDisposable
 
     public void Dispose()
     {
-        lock (_gate) _writer.Dispose();
+        lock (_gate)
+        {
+            _disposed = true;
+            _writer.Dispose();
+        }
     }
 }

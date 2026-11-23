@@ -76,12 +76,17 @@ static partial class Program
             catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
             if (!first)
             {
-                if (gui)
+                // Bring the running window to the front, except for the (delayed) logon task, which must stay hidden.
+                if (gui && mode != "--tray")
                 {
-                    using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-                    show.Set(); // bring the running window to the front
-                    return 0;
+                    try
+                    {
+                        using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+                        show.Set();
+                    }
+                    catch (UnauthorizedAccessException) { /* running instance is elevated */ }
                 }
+                if (gui) return 0;
                 Console.Error.WriteLine("VolumeBridge is already running.");
                 return 6;
             }
@@ -92,10 +97,12 @@ static partial class Program
         try { config = AppConfig.LoadOrCreate(configPath); }
         catch (Exception e)
         {
-            if (gui) MessageBox.Show($"无法读取 {configPath}：{e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (gui) MessageBox.Show($"Cannot read {configPath}: {e.Message}", "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
             else Console.Error.WriteLine($"Cannot read {configPath}: {e.Message}");
             return 2;
         }
+
+        Loc.Current = Loc.Resolve(config.Language, ReadInstallerLanguage(), System.Globalization.CultureInfo.CurrentUICulture);
 
         int exitCode = gui ? RunGui(mode, config, dataDir, configPath) : RunConsole(mode, args, config, dataDir, configPath);
         single?.Dispose();
@@ -112,7 +119,9 @@ static partial class Program
         log.Write($"VolumeBridge {TrayApp.CurrentVersion.ToString(3)} {mode}, {Environment.OSVersion}, config: {configPath}");
         using var engine = new Engine(config, log.Write);
         using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-        string? notice = mode == "--updated" ? $"已更新到 {TrayApp.CurrentVersion.ToString(3)}" : null;
+        string? notice = mode == "--updated"
+            ? Loc.T($"已更新到 {TrayApp.CurrentVersion.ToString(3)}", $"Updated to {TrayApp.CurrentVersion.ToString(3)}")
+            : null;
         Application.ThreadException += (_, e) => log.Write($"UI error: {e.Exception}");
         using var app = new TrayApp(engine, log, dataDir, configPath, show, startHidden: mode == "--tray", notice);
         Application.Run(app);
@@ -182,6 +191,17 @@ static partial class Program
         finished.Set();
         GC.KeepAlive(signals);
         return exitCode;
+    }
+
+    /// <summary>Language picked in the installer (written next to the exe), if any.</summary>
+    static string? ReadInstallerLanguage()
+    {
+        try
+        {
+            string f = Path.Combine(AppContext.BaseDirectory, Loc.InstallerChoiceFile);
+            return File.Exists(f) ? File.ReadAllText(f).Trim() : null;
+        }
+        catch (Exception) { return null; }
     }
 
     static int Try(Action action, string done)

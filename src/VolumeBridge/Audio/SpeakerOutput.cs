@@ -21,6 +21,7 @@ public sealed partial class SpeakerOutput : IDisposable
     readonly Action<string> _log;
     readonly CancellationTokenSource _stop = new();
     readonly AutoResetEvent _reopen = new(false);
+    volatile bool _reopenRequested;
     readonly Thread _thread;
     string? _lastProblem;
 
@@ -34,13 +35,17 @@ public sealed partial class SpeakerOutput : IDisposable
     }
 
     /// <summary>Short status for the periodic log line.</summary>
-    public string Status { get; private set; } = "启动中";
+    public string Status { get; private set; } = Loc.T("启动中", "Starting");
     public double PaddingMs { get; private set; }
 
     public void Start() => _thread.Start();
 
     /// <summary>Closes the current device (if any) and looks for the output again right away.</summary>
-    public void Reopen() => _reopen.Set();
+    public void Reopen()
+    {
+        _reopenRequested = true;
+        _reopen.Set();
+    }
 
     public void Dispose()
     {
@@ -51,10 +56,12 @@ public sealed partial class SpeakerOutput : IDisposable
     /// <summary>Plain-language text for the errors users actually meet.</summary>
     static string Explain(Exception e) => (uint)e.HResult switch
     {
-        0x8889000A => "被其他程序独占（例如 Voicemeeter），请退出该程序",           // AUDCLNT_E_DEVICE_IN_USE
-        0x88890004 => "设备已断开",                                              // AUDCLNT_E_DEVICE_INVALIDATED
-        0x80070005 => "暂时无法访问（锁屏、睡眠或音频服务重启中）",                 // E_ACCESSDENIED
-        0x80070490 or 0x80070002 => "设备已不存在",                                // ELEMENT_NOT_FOUND / FILE_NOT_FOUND
+        0x8889000A => Loc.T("被其他程序独占（例如 Voicemeeter），请退出该程序",       // AUDCLNT_E_DEVICE_IN_USE
+                            "in use by another program (e.g. Voicemeeter); please quit it"),
+        0x88890004 => Loc.T("设备已断开", "device disconnected"),                    // AUDCLNT_E_DEVICE_INVALIDATED
+        0x80070005 => Loc.T("暂时无法访问（锁屏、睡眠或音频服务重启中）",              // E_ACCESSDENIED
+                            "temporarily unavailable (locked, asleep or audio service restarting)"),
+        0x80070490 or 0x80070002 => Loc.T("设备已不存在", "device no longer exists"), // ELEMENT_NOT_FOUND / FILE_NOT_FOUND
         _ => $"{e.GetType().Name} 0x{e.HResult:X8} {e.Message}",
     };
 
@@ -69,15 +76,24 @@ public sealed partial class SpeakerOutput : IDisposable
             // FileNotFound when the device vanished, ...); none may kill this thread.
             catch (Exception e) when (e is not OutOfMemoryException)
             {
-                Problem($"输出错误：{Explain(e)}");
+                Problem(Loc.T($"输出错误：{Explain(e)}", $"Output error: {Explain(e)}"));
             }
             _bridge.Stop();
             _onPpm(0);
             PaddingMs = 0;
             if (started.Elapsed > TimeSpan.FromSeconds(10)) backoff = TimeSpan.FromMilliseconds(500);
+            if (_reopenRequested)
+            {
+                _reopenRequested = false;
+                continue; // user picked another device: look again immediately
+            }
             int woke = WaitHandle.WaitAny([_stop.Token.WaitHandle, _reopen], backoff);
             if (woke == 0) return;
-            if (woke == 1) backoff = TimeSpan.FromMilliseconds(250);
+            if (woke == 1)
+            {
+                _reopenRequested = false;
+                backoff = TimeSpan.FromMilliseconds(250);
+            }
             backoff = TimeSpan.FromMilliseconds(Math.Min(backoff.TotalMilliseconds * 2, 5000));
         }
     }
@@ -102,7 +118,7 @@ public sealed partial class SpeakerOutput : IDisposable
             var match = DeviceMatcher.FindOutput(_config.OutputKeywords, _config.OutputDeviceId, infos, virtualId);
             if (match.Device is null)
             {
-                Problem($"找不到输出设备：{match.Error}");
+                Problem(Loc.T($"找不到输出设备：{match.Error}", $"Output device not found: {match.Error}"));
                 return;
             }
             (id, name) = (match.Device.Id, match.Device.Name);
@@ -130,7 +146,7 @@ public sealed partial class SpeakerOutput : IDisposable
         _log(string.Create(CultureInfo.InvariantCulture,
             $"output opened: \"{name}\" {fmt.SampleRate}Hz {fmt.Channels}ch {fmt.Sample}, buffer {bufferFrames * 1000.0 / fmt.SampleRate:0.0} ms, stream latency {client.StreamLatency / 10_000.0:0.0} ms"));
         _lastProblem = null;
-        Status = string.Create(CultureInfo.InvariantCulture, $"{name}（{fmt.SampleRate} Hz）");
+        Status = string.Create(CultureInfo.InvariantCulture, $"{name} ({fmt.SampleRate} Hz)");
 
         int taskIndex = 0;
         IntPtr mmcss = AvSetMmThreadCharacteristicsW("Pro Audio", ref taskIndex);
@@ -166,7 +182,7 @@ public sealed partial class SpeakerOutput : IDisposable
         {
             try { client.Stop(); } catch (Exception) { /* device already gone */ }
             if (mmcss != IntPtr.Zero) AvRevertMmThreadCharacteristics(mmcss);
-            Status = "已关闭";
+            Status = Loc.T("已关闭", "Closed");
         }
     }
 

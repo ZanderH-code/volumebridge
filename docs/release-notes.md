@@ -8,4 +8,5 @@
 - 窗口界面 + 托盘运行，没有控制台窗口 / Window + tray, no console window
 - 一键设为默认输出、输出设备选择、开机自启、一键更新 / Set-as-default button, output picker, start at logon, one-click update
 - 音质：48 kHz 原样传递，时钟漂移靠调节虚拟时钟吸收；延迟默认约 20 ms 缓冲 / 48 kHz bit-exact path (gain only), drift absorbed by clock steering; ~20 ms default buffer
+- 安装时可选 English / 简体中文，程序界面跟随，可在窗口切换 / Installer and app in English or Simplified Chinese
 - 仅在 JBL Flip 6（USB 音频模式）上实测 / Tested with JBL Flip 6 (USB audio mode) only

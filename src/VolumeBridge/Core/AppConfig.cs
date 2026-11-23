@@ -42,6 +42,9 @@ public sealed class AppConfig
     public string? UsbipPath { get; set; }
     public int SmoothingMs { get; set; } = 20;
 
+    /// <summary>UI language: "auto" (installer choice, else Windows), "zh" or "en".</summary>
+    public string Language { get; set; } = "auto";
+
     /// <summary>auto | apply | passthrough. See docs/PLAN.md, "双重衰减".</summary>
     public string GainMode { get; set; } = "auto";
 
