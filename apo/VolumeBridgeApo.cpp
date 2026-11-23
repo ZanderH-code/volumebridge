@@ -156,7 +156,9 @@ public:
     {
         if ((pbyData == nullptr) != (cbDataSize == 0)) return E_INVALIDARG;
         if (m_bIsInitialized) return APOERR_ALREADY_INITIALIZED;
-        if (pbyData != nullptr && reinterpret_cast<APOInitBaseStruct*>(pbyData)->cbSize != cbDataSize) return E_INVALIDARG;
+        if (pbyData != nullptr &&
+            (cbDataSize < sizeof(APOInitBaseStruct) || reinterpret_cast<APOInitBaseStruct*>(pbyData)->cbSize != cbDataSize))
+            return E_INVALIDARG;
 
         // The structures differ in layout (v3 replaced two pointers with one), so match sizes exactly.
         IMMDeviceCollection* devices = nullptr;
@@ -222,11 +224,13 @@ public:
         m_rampLeft = 0;
         if (m_shared != nullptr)
         {
+            AcquireSRWLockExclusive(&g_sharedLock); // non-RT; keeps reset + increment together
             // A new audiodg process: instance counts left by a previous (crashed/restarted) one are stale.
             const LONG pid = static_cast<LONG>(GetCurrentProcessId());
             if (InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoPid), pid) != pid)
                 InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances), 0);
             InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            ReleaseSRWLockExclusive(&g_sharedLock);
             InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoSampleRate), static_cast<LONG>(rate));
             InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_shared->apoChannels), static_cast<LONG>(m_u32SamplesPerFrame));
         }
@@ -237,7 +241,11 @@ public:
     STDMETHODIMP UnlockForProcess() override
     {
         if (m_counted && m_shared != nullptr)
+        {
+            AcquireSRWLockExclusive(&g_sharedLock);
             InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            ReleaseSRWLockExclusive(&g_sharedLock);
+        }
         m_counted = false;
         return CBaseAudioProcessingObject::UnlockForProcess();
     }
@@ -350,7 +358,11 @@ private:
     ~VolumeBridgeApo()
     {
         if (m_counted && m_shared != nullptr)
+        {
+            AcquireSRWLockExclusive(&g_sharedLock);
             InterlockedDecrement(reinterpret_cast<volatile LONG*>(&m_shared->apoInstances));
+            ReleaseSRWLockExclusive(&g_sharedLock);
+        }
         if (m_endpoint != nullptr) m_endpoint->Release();
         g_objects--;
     }

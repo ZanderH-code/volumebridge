@@ -8,17 +8,24 @@
 
 ## 工作原理
 
+**零延迟模式（默认）**
+
 ```
-应用程序 ──▶ "VolumeBridge Speaker"（VolumeBridge 模拟的 USB 音箱，设为默认输出）
-               │  Windows 把音量和静音以 dB 发给它，和发给真实 USB 音箱一样
-               ▼
-          VolumeBridge：按该 dB 调整增益（20 ms 平滑过渡）──▶ 你的 USB 音箱
+应用程序 ──▶ 你的 USB 音箱（默认输出）
+               └ 音效链中的 VolumeBridge 音量插件（APO）：按 Windows 音量滑块和静音调节，原地处理，无缓冲
 ```
 
-- VolumeBridge 通过 USB/IP 模拟一个标准 USB 音频设备（UAC1，48 kHz / 16-bit / 立体声），由 Windows 自带的 USB 音频驱动识别。这个设备声明了硬件音量控制，所以 Windows 不会先把声音调小，而是把音量值直接交给 VolumeBridge，**不会被重复调小**。
-- 虚拟 USB 主控来自 [usbip-win2](https://github.com/vadimgrn/usbip-win2)。它是已签名的开源驱动，安装包会自动安装。项目本身不包含自写驱动。
-- **音质**：音箱是 48 kHz 时，采样原样传过去，只乘一次音量增益。两台设备时钟的微小差异，通过微调虚拟音箱的时钟来吸收，不改动声音本身。音箱是其他采样率时，用 64 抽头的 Kaiser 窗 sinc 重采样（阻带约 80 dB）。
-- **延迟**：VolumeBridge 自身默认缓冲约 20 ms，加上 Windows 和 USB 部分，总计大约 40–60 ms。普通蓝牙音频常见的是 150–250 ms。更低延迟的模式在计划中（见下方路线图）。
+- 插件挂在音箱自己的音效链里（端点效果 EFX），在 Windows 音频引擎内部按滑块值乘增益，带 20 ms 平滑过渡，**不增加任何延迟**。
+- 音量来源：优先用 Windows 11 给插件的音量通知；收不到时，由托盘程序读取滑块后交给插件。
+- **代价**：插件未签名，需要关闭 Windows 的"受保护音频路径"（`DisableProtectedAudioDG=1`），少数 DRM 播放可能受影响。该音箱的"音频增强"必须保持开启。独占模式播放的程序会绕过插件。卸载时全部恢复。
+
+**兼容模式（可在窗口切换）**
+
+```
+应用程序 ──▶ "VolumeBridge Speaker"（VolumeBridge 模拟的 USB 音箱）──▶ 按 dB 调增益 ──▶ 你的 USB 音箱
+```
+
+- 通过 USB/IP 模拟一个标准 USB 音箱，需要 [usbip-win2](https://github.com/vadimgrn/usbip-win2) 驱动（安装时可选）。不改动系统音频设置，但会增加约 40–60 ms 延迟。
 
 ## 兼容性
 
@@ -29,11 +36,9 @@
 
 ## 安装与使用
 
-1. 从 [Releases](https://github.com/ZanderH-code/volumebridge/releases/latest) 下载 `VolumeBridgeSetup.exe` 并运行。
-   - 会自动安装 usbip-win2 驱动。装驱动时 USB 设备会断开几秒，属于正常。
-   - 如果提示重启，可以先不重启试用，用不了再重启。
-2. **先退出 Voicemeeter**。它会独占音箱，两者不能同时运行。
-3. 打开 VolumeBridge，在窗口里点 **"设为默认输出"**，把 VolumeBridge Speaker 设为默认播放设备。
+1. 接好音箱，**先退出 Voicemeeter**（它会独占音箱）。
+2. 从 [Releases](https://github.com/ZanderH-code/volumebridge/releases/latest) 下载 `VolumeBridgeSetup.exe` 并运行，保持"启用零延迟音量插件"勾选。安装时 Windows 音频会中断约 2 秒。
+3. 打开 VolumeBridge，确认显示"已就绪/正在工作（零延迟）"，再点 **"设为默认输出"** 把音箱设为默认播放设备。
 4. 勾选 **"开机自动启动"**。关闭窗口后程序会继续在托盘里运行；右键托盘图标可以退出。
 5. 有新版本时点 **"检查更新"**，会自动下载、校验并安装。安装时需要一次管理员确认。
 
@@ -49,7 +54,8 @@
 | `outputBufferMs` | 10 | 音箱端 WASAPI 缓冲 |
 | `minDb` / `maxDb` / `volumeStepDb` | -60 / 0 / 0.25 | 交给 Windows 的音量范围和步长 |
 | `smoothingMs` | 20 | 音量变化的平滑时长 |
-| `usbipPort` | 3240 | 本机 USB/IP 端口 |
+| `mode` | `apo` | `apo` 零延迟模式；`virtual` 兼容模式 |
+| `usbipPort` | 3240 | 本机 USB/IP 端口（兼容模式） |
 | `language` | `auto` | `zh` / `en`；`auto` 表示跟随安装时的选择，没有则跟随 Windows 语言 |
 
 ## 路线图
@@ -60,7 +66,10 @@
 
 ## 已知局限
 
-- 依赖第三方驱动 usbip-win2，其稳定性也取决于该项目。
+- **万一装完没声音**：在"设置 → 应用"中卸载 VolumeBridge（会恢复原设置），或在声音设置里把该音箱的"音频增强"改为"关"（插件即被跳过）。
+
+- 兼容模式依赖第三方驱动 usbip-win2。
+- Windows 大版本更新或换 USB 口后，插件设置可能失效，窗口会提示，点"启用插件"即可。
 - 没有混音台、多路输出等 Voicemeeter 的功能。
 - 尚未处理：通话时 Windows 自动压低其他声音（ducking）；睡眠唤醒后要等约 30 秒才自动恢复连接。
 - 卸载时会询问是否一并卸载 usbip-win2（其他软件可能也在使用它），卸载驱动后需要重启。
