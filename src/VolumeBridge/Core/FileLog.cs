@@ -39,7 +39,8 @@ public sealed class FileLog : IDisposable
                 {
                     _writer.Dispose();
                     string old = System.IO.Path.ChangeExtension(_path, ".1.log");
-                    File.Move(_path, old, overwrite: true);
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(_path, old);
                     _writer = Open(append: false);
                 }
                 _writer.WriteLine(line);
