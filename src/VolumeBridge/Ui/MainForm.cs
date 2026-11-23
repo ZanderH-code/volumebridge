@@ -22,6 +22,7 @@ sealed class MainForm : Form
     readonly Label _outputCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly ComboBox _outputs = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
     readonly Button _enableApo = new() { AutoSize = true };
+    readonly Button _removeApo = new() { AutoSize = true };
     readonly Label _capCaption = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
     readonly NumericUpDown _cap = new() { Minimum = -30, Maximum = 0, Increment = 1, Width = 60 };
     readonly Label _capUnit = new() { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
@@ -65,7 +66,7 @@ sealed class MainForm : Form
         root.Controls.Add(_volumeCaption);
         root.Controls.Add(_volume);
         root.Controls.Add(Spacer());
-        root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault, _enableApo));
+        root.Controls.Add(Row(_virtualCaption, _virtual, _makeDefault, _enableApo, _removeApo));
         root.Controls.Add(Row(_outputCaption, _outputs));
         root.Controls.Add(Row(_capCaption, _cap, _capUnit));
         root.Controls.Add(Spacer());
@@ -85,6 +86,8 @@ sealed class MainForm : Form
         _cap.ValueChanged += (_, _) => _app.SetMaxOutputDb((double)_cap.Value);
         _enableApo.Click += async (_, _) => await EnableApo();
         _enableApo.Visible = false;
+        _removeApo.Click += async (_, _) => await RemoveApo();
+        _removeApo.Visible = false;
         _makeDefault.Click += (_, _) => MakeDefault();
         _outputs.DropDown += (_, _) => LoadOutputs();
         _outputs.SelectedIndexChanged += (_, _) => OutputChosen();
@@ -104,6 +107,7 @@ sealed class MainForm : Form
         _capCaption.Text = T("最大音量（滑块 100% 时）：", "Maximum volume (slider at 100%):");
         _capUnit.Text = T("dB（0 = 音箱原始最大音量）", "dB (0 = the speaker's own full level)");
         _enableApo.Text = T("启用插件", "Enable plugin");
+        _removeApo.Text = T("移除插件", "Remove plugin");
         _volumeCaption.Text = T("Windows 音量", "Windows volume");
         _makeDefault.Text = T("设为默认输出", "Set as default output");
         _outputCaption.Text = T("输出设备：", "Output device:");
@@ -155,6 +159,35 @@ sealed class MainForm : Form
                 "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
+    async Task RemoveApo()
+    {
+        if (MessageBox.Show(this,
+                T("将移除 VolumeBridge 音量插件并恢复 Windows 原有音频设置：\n\n• 还原所有音箱的音效设置和“受保护音频路径”设置\n• 注销并删除插件 DLL\n• 重新启动 Windows 音频服务（声音中断约 2 秒）\n• 移除开机自动启动任务\n\n需要管理员确认。继续吗？",
+                  "This removes the VolumeBridge volume plugin and restores the original Windows audio settings:\n\n• restores all speaker effect settings and the protected audio path setting\n• unregisters and deletes the plugin DLL\n• restarts the Windows Audio service (sound stops for ~2 s)\n• removes the start-at-logon task\n\nNeeds administrator approval. Continue?"),
+                "VolumeBridge", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+            return;
+        _removeApo.Enabled = false;
+        _enableApo.Enabled = false;
+        bool ok = await _app.RemoveApoAsync();
+        _removeApo.Enabled = true;
+        _enableApo.Enabled = true;
+        if (!ok)
+        {
+            MessageBox.Show(this, T("移除插件失败或已取消。详情见 C:\\ProgramData\\VolumeBridge\\apo-setup.log。",
+                                    "Removing the plugin failed or was cancelled. See C:\\ProgramData\\VolumeBridge\\apo-setup.log."),
+                "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        try { Autostart.Uninstall(); } catch (Exception) { }
+        _settingAutostart = true;
+        _autostart.Checked = SafeIsAutostart();
+        _settingAutostart = false;
+        MessageBox.Show(this,
+            T("插件已移除，原有音频设置已恢复，开机自启已取消。\n\n现在可以退出并直接删除 VolumeBridge.exe。\n如需清理配置与日志，也可删除 %LOCALAPPDATA%\\VolumeBridge 和 C:\\ProgramData\\VolumeBridge。",
+              "The plugin has been removed, original audio settings restored, and start-at-logon removed.\n\nYou can now quit and delete VolumeBridge.exe.\nOptionally, you can also delete %LOCALAPPDATA%\\VolumeBridge and C:\\ProgramData\\VolumeBridge."),
+            "VolumeBridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
     /// <summary>Zero-latency mode status.</summary>
     public void ShowApo(ApoStatus a)
     {
@@ -163,10 +196,15 @@ sealed class MainForm : Form
         _virtualCaption.Text = T("音量插件：", "Volume plugin:");
         (string head, Color color, string detail) = a.State switch
         {
+            ApoState.LegacyInstallPresent => (T("● 检测到旧的安装版", "● Legacy installed version detected"), Color.Firebrick,
+                T("检测到旧的安装版 VolumeBridge，请先在 设置 → 应用 中卸载它，再点启用插件。",
+                  "An older installed version of VolumeBridge was detected. Please uninstall it in Settings → Apps first, then click Enable plugin.")),
             ApoState.NoSpeaker => (T("● 未找到音箱", "● Speaker not found"), Color.DarkOrange,
                 T("请连接音箱，或在下方“输出设备”中选择它。", "Connect the speaker, or pick it under \"Output device\".")),
             ApoState.NotInstalled => (T("● 音量插件未启用", "● Volume plugin not enabled"), Color.Firebrick,
                 T($"{a.SpeakerName}：点击“启用插件”（需要管理员确认）。", $"{a.SpeakerName}: click \"Enable plugin\" (needs administrator approval).")),
+            ApoState.Outdated => (T("● 音量插件需要更新", "● Volume plugin update available"), Color.DarkOrange,
+                T($"{a.SpeakerName}：当前程序包含新版插件，点击“更新插件”（需要管理员确认）。", $"{a.SpeakerName}: this version includes an updated plugin; click \"Update plugin\" (needs administrator approval).")),
             ApoState.EnhancementsOff => (T("● 音频增强已关闭", "● Audio enhancements are off"), Color.Firebrick,
                 T("设置 → 系统 → 声音 → 该音箱 → 音频增强，改为“设备默认效果”。", "Settings → System → Sound → the speaker → Audio enhancements: set to \"Device Default Effects\".")),
             ApoState.Idle => (T("● 已就绪（零延迟）", "● Ready (zero latency)"), Color.ForestGreen,
@@ -179,11 +217,15 @@ sealed class MainForm : Form
         _detail.Text = detail;
         _volume.Text = a.VolumeText;
 
-        _enableApo.Visible = a.State == ApoState.NotInstalled;
+        _enableApo.Text = a.State == ApoState.Outdated ? T("更新插件", "Update plugin") : T("启用插件", "Enable plugin");
+        _enableApo.Visible = a.State is ApoState.NotInstalled or ApoState.Outdated;
+        _removeApo.Visible = a.PluginPresent && a.State != ApoState.LegacyInstallPresent;
         _virtual.Text = a.State switch
         {
+            ApoState.LegacyInstallPresent => T("需先卸载旧版", "uninstall old version first"),
             ApoState.NoSpeaker => "—",
             ApoState.NotInstalled => T("未启用", "not enabled"),
+            ApoState.Outdated => T("需要更新", "update available"),
             _ => T("已启用", "enabled"),
         };
 

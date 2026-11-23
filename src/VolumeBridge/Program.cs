@@ -163,8 +163,13 @@ static class Program
         {
             if (mode == "--apo-remove")
             {
-                ApoRegistration.RemoveAll(log.Write);
+                ApoRegistration.FullRemove(log.Write);
                 return 0;
+            }
+            if (ApoRegistration.IsLegacyInstallerPresent())
+            {
+                log.Write("refusing --apo-setup: an older installed version of VolumeBridge (Inno Setup) is still present. Uninstall it in Settings -> Apps first.");
+                return 2;
             }
             string configPath = Path.Combine(dataDir, AppConfig.FileName);
             var config = File.Exists(configPath) ? AppConfig.LoadOrCreate(configPath) : new AppConfig();
@@ -175,7 +180,9 @@ static class Program
                 log.Write("no matching speaker connected; nothing changed (enable it later from the VolumeBridge window)");
                 return 0;
             }
+            string dllPath = ApoRegistration.DeployAndRegisterDll(log.Write);
             ApoRegistration.Install(ids, log.Write);
+            ApoRegistration.CleanupOldDlls(keepPath: dllPath, removeDirIfEmpty: false, log.Write);
             return 0;
         }
         catch (Exception e)

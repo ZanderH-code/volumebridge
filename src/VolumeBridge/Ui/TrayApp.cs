@@ -164,18 +164,23 @@ sealed class TrayApp : ApplicationContext
     public void ReopenOutput() => Apo.Recheck();
 
     /// <summary>Runs the elevated plugin setup for <paramref name="endpointId"/> (one UAC prompt).</summary>
-    public async Task<bool> EnableApoAsync(string endpointId)
+    public Task<bool> EnableApoAsync(string endpointId) => RunElevatedApoAsync($"--apo-setup \"{endpointId}\"");
+
+    /// <summary>Runs the elevated plugin removal (one UAC prompt).</summary>
+    public Task<bool> RemoveApoAsync() => RunElevatedApoAsync("--apo-remove");
+
+    async Task<bool> RunElevatedApoAsync(string arguments)
     {
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, $"--apo-setup \"{endpointId}\"")
+            using var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, arguments)
             {
                 UseShellExecute = true,
                 Verb = "runas",
                 WindowStyle = ProcessWindowStyle.Hidden,
             })!;
             await Task.Run(() => p.WaitForExit());
-            _log.Write($"apo-setup exited with {p.ExitCode}");
+            _log.Write($"{arguments} exited with {p.ExitCode}");
             Apo.Recheck();
             return p.ExitCode == 0;
         }
