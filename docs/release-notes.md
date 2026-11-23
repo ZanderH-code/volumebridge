@@ -4,6 +4,9 @@
 
 `VolumeBridgeSetup.exe.sha256` is used by the in-app updater to verify the download.
 
+### 0.3.1
+- 修复：安装时和“启用插件”按钮无法完成插件设置（无控制台时设置编码出错，且没有留下日志）。 / Fix: enabling the plugin from the installer or the window failed silently (console encoding set without a console).
+
 ### 0.3.0
 - 新的默认模式“零延迟”：在音箱自身的音效链里加入一个音量插件（APO），按 Windows 音量滑块和静音调节，**没有附加延迟**，也不再需要虚拟音箱。 / New default "zero latency" mode: a volume plugin (APO) in the speaker's own effect chain follows the Windows slider and mute with **no added latency** and no virtual speaker.
 - 代价：关闭 Windows“受保护音频路径”（少数 DRM 播放可能受影响）；需保持该音箱“音频增强”开启；卸载时全部恢复。 / Trade-offs: Windows' protected audio path is turned off (a few DRM players may be affected); "Audio enhancements" must stay on; everything is restored on uninstall.

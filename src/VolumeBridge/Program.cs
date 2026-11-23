@@ -41,8 +41,26 @@ static partial class Program
         {
             // WinExe: reuse the parent console when started from a terminal, otherwise open one —
             // except for the plugin setup commands run hidden by the installer / the window (they log to a file).
-            if (!AttachConsole(-1) && mode is not ("--apo-setup" or "--apo-remove")) AllocConsole();
-            Console.OutputEncoding = Encoding.UTF8;
+            bool console = AttachConsole(-1) || (mode is not ("--apo-setup" or "--apo-remove") && AllocConsole());
+            // Setting the console code page throws when there is no console at all.
+            if (console)
+            {
+                try { Console.OutputEncoding = Encoding.UTF8; } catch (IOException) { }
+            }
+        }
+        if (mode is "--apo-setup" or "--apo-remove")
+        {
+            // Whatever goes wrong before the setup log is open must still leave a trace.
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(ApoShared.FilePath)!;
+                    Directory.CreateDirectory(dir);
+                    File.AppendAllText(Path.Combine(dir, "apo-setup.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {mode} crashed: {e.ExceptionObject}{Environment.NewLine}");
+                }
+                catch (Exception) { }
+            };
         }
 
         if (mode is "--help" or "-h")
