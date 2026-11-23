@@ -32,6 +32,22 @@ jobs:
           }
           "version=$v" >> $env:GITHUB_OUTPUT
 
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build APO
+        shell: pwsh
+        run: |
+          # Headers/libs for APOs live in the Windows SDK (um); fail with a clear message if not found.
+          $h = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -Filter BaseAudioProcessingObject.h -ErrorAction SilentlyContinue | Select-Object -First 1
+          $l = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib" -Recurse -Filter AudioBaseProcessingObjectV140.lib -ErrorAction SilentlyContinue | Where-Object FullName -like '*x64*' | Select-Object -First 1
+          "header: $($h.FullName)"; "lib: $($l.FullName)"
+          if (-not $h -or -not $l) { throw "APO SDK files not found" }
+          $env:INCLUDE = "$($h.DirectoryName);$env:INCLUDE"
+          $env:LIB = "$($l.DirectoryName);$env:LIB"
+          ./apo/build.ps1 -Out "$PWD\out"
+
       - run: dotnet test tests/VolumeBridge.Tests -c Release
       - run: dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
 
