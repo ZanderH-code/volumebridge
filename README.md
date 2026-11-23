@@ -72,4 +72,4 @@ Cross-compiling from Linux works. CI (`.github/workflows/build.yml`) builds the 
 - The UAC1 device and USB/IP server are adapted from [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables) (BSD-2-Clause).
 - [usbip-win2](https://github.com/vadimgrn/usbip-win2) (BSD-2-Clause) is bundled unmodified.
 - [NAudio](https://github.com/naudio/NAudio) (MIT).
-- Full third-party license texts are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). A license for VolumeBridge itself has not been chosen yet.
+- Full third-party license texts are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). VolumeBridge itself is released under the [MIT License](LICENSE).

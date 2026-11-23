@@ -42,6 +42,7 @@ WelcomeLabel2=This will install VolumeBridge {#AppVersion}.%n%nIt also installs 
 [Files]
 Source: "{#PayloadDir}\VolumeBridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; Installed right after extraction (AfterInstall) so NeedRestart, evaluated at the end of the copy phase, sees it.
 Source: "{#PayloadDir}\{#UsbipSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: UsbipNeeded; AfterInstall: InstallUsbip
 

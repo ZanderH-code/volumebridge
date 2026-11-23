@@ -70,4 +70,4 @@ dotnet publish src/VolumeBridge -c Release -r win-x64 -o out
 - UAC1 设备描述与 USB/IP 服务端移植自 [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables)（BSD-2-Clause）。
 - [usbip-win2](https://github.com/vadimgrn/usbip-win2)（BSD-2-Clause）随安装包分发，未做修改。
 - [NAudio](https://github.com/naudio/NAudio)（MIT）。
-- 第三方许可全文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。本项目自身的许可证尚未选定。
+- 第三方许可全文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。本项目以 [MIT 许可证](LICENSE) 发布。
