@@ -217,7 +217,8 @@ begin
         SuppressibleMsgBox(FmtMessage(CustomMessage('RemoveUsbipFailed'), [SysErrorMessage(ResultCode)]), mbError, MB_OK, IDOK);
     end;
   end;
-  RegDeleteKeyIncludingSubkeys(HKLM64, '{#MarkerKey}');
+  // Only our marker: the same key holds the FxProperties backups (restored by --apo-remove).
+  RegDeleteValue(HKLM64, '{#MarkerKey}', 'InstalledUsbip');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

@@ -78,14 +78,34 @@ sealed class TrayApp : ApplicationContext
 
     static string UpdateDir => Path.Combine(Path.GetTempPath(), "VolumeBridgeUpdate");
 
-    /// <summary>Installers downloaded by earlier one-click updates are no longer needed.</summary>
+    bool _updating;
+
+    /// <summary>
+    /// Installers downloaded by earlier one-click updates are no longer needed. Runs in the background
+    /// with retries: right after an update, the installer that relaunched us may still be running from there.
+    /// </summary>
     void CleanUpOldInstallers()
     {
-        try
+        var ct = _quit.Token;
+        Task.Run(async () =>
         {
-            if (Directory.Exists(UpdateDir)) Directory.Delete(UpdateDir, recursive: true);
-        }
-        catch (Exception e) { _log.Write($"could not delete old update downloads: {e.Message}"); }
+            for (int attempt = 0; attempt < 6 && !ct.IsCancellationRequested; attempt++)
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
+                if (_updating || !Directory.Exists(UpdateDir)) return; // a new download owns the folder
+                bool left = false;
+                foreach (var f in Directory.EnumerateFiles(UpdateDir))
+                {
+                    try { File.Delete(f); }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { left = true; }
+                }
+                if (!left)
+                {
+                    try { Directory.Delete(UpdateDir); } catch (Exception) { }
+                    return;
+                }
+            }
+        }, ct);
     }
     public string DataDir { get; }
     public bool Quitting { get; private set; }
@@ -221,6 +241,7 @@ sealed class TrayApp : ApplicationContext
     public async Task CheckForUpdatesAsync(IWin32Window owner, Button button)
     {
         var ct = _quit.Token;
+        _updating = true;
         button.Enabled = false;
         bool Gone() => Quitting || button.IsDisposed;
         try

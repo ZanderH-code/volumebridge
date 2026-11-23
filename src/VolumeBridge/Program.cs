@@ -30,7 +30,7 @@ static partial class Program
     static int Main(string[] args)
     {
         string mode = args.Length == 0 ? "--gui" : args[0];
-        bool gui = mode is "--gui" or "--tray" or "--updated" or "--relaunch";
+        bool gui = mode is "--gui" or "--tray" or "--updated";
 
         if (!gui)
         {
@@ -60,7 +60,7 @@ static partial class Program
                 return Try(Autostart.Uninstall, "autostart removed");
             case "--apo-setup" or "--apo-remove":
                 return ApoAdmin(mode, args, dataDir);
-            case "--gui" or "--tray" or "--updated" or "--relaunch":
+            case "--gui" or "--tray" or "--updated":
                 break;
             default:
                 Console.Error.WriteLine($"Unknown option: {mode}\n\n{Usage}");
@@ -73,7 +73,7 @@ static partial class Program
         try
         {
             single = new Mutex(false, MutexName);
-            try { first = single.WaitOne(mode == "--relaunch" ? 15_000 : 0); }
+            try { first = single.WaitOne(0); }
             catch (AbandonedMutexException) { first = true; }
         }
         catch (UnauthorizedAccessException) { first = false; } // held by an elevated instance
